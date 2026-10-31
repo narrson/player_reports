@@ -293,8 +293,15 @@ def styled_df(df, row_bg=None, cell=None, height=None, **kw):
 # Data (cached on the server, shared by every visit)
 # ------------------------------------------------------------------------------------
 
-@st.cache_resource(ttl=pr.CACHE_HOURS * 3600, max_entries=2, show_spinner=False)
+DATA_VERSION = 5  # bump whenever player_report.py changes what a Season holds, so stale cached data is dropped
+
+
 def get_season(season, scoring):
+    return _load_season(season, scoring, DATA_VERSION)
+
+
+@st.cache_resource(ttl=pr.CACHE_HOURS * 3600, max_entries=2, show_spinner=False)
+def _load_season(season, scoring, version):
     sc = dict(pr.SCORING)
     if sc.get("rec") is None:
         sc["rec"] = pr.FORMAT_REC[scoring]
@@ -1143,6 +1150,14 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 GENERIC_LOGIN_ERROR = "Username or password is incorrect."
 
 
+def text_in(label, autocomplete="off", **kw):
+    """st.text_input with an autocomplete hint so browsers and password managers know what each field is."""
+    try:
+        return st.text_input(label, autocomplete=autocomplete, **kw)
+    except TypeError:  # older Streamlit without the autocomplete option
+        return st.text_input(label, **kw)
+
+
 def _secrets(section):
     try:
         return dict(st.secrets[section]) if section in st.secrets else None
@@ -1463,8 +1478,12 @@ def write_cookie(value, days):
     import streamlit.components.v1 as components
     age = 0 if value is None else int(days * 86400)
     val = value or ""
-    components.html(f"<script>document.cookie='{COOKIE}={val}; path=/; max-age={age}; SameSite=Lax; Secure';"
-                    f"</script>", height=0)
+    c = f"{COOKIE}={val}; path=/; max-age={age}; SameSite=Lax; Secure"
+    components.html(
+        "<script>(function(){var c='" + c + "';"
+        "var ws=[window];try{if(window.parent&&window.parent!==window)ws.push(window.parent)}catch(e){}"
+        "try{if(window.top&&ws.indexOf(window.top)<0)ws.push(window.top)}catch(e){}"
+        "ws.forEach(function(w){try{w.document.cookie=c}catch(e){}});})();</script>", height=0)
 
 
 def read_cookie():
@@ -2001,8 +2020,34 @@ def name_index(_S, key):
     return idx
 
 
+def ensure_idmap(S):
+    """Load the cross-platform player ID table if this Season doesn't have it yet."""
+    if getattr(S, "idmap", None) and any(S.idmap.values()):
+        return S.idmap
+    S.idmap = {"sleeper": {}, "espn": {}, "yahoo": {}}
+    try:
+        import nflreadpy as nfl
+        for r in nfl.load_ff_playerids().to_dicts():
+            gid = r.get("gsis_id")
+            if not gid:
+                continue
+            for plat in S.idmap:
+                v = r.get(f"{plat}_id")
+                if v is None or v == "" or (isinstance(v, float) and math.isnan(v)):
+                    continue
+                try:
+                    v = str(int(float(v)))
+                except (TypeError, ValueError):
+                    v = str(v).strip()
+                S.idmap[plat][v] = gid
+    except Exception:
+        pass  # fall back to name matching
+    return S.idmap
+
+
 def map_player(S, plat, ext_id, name=None):
-    gid = S.idmap.get(plat, {}).get(str(ext_id).strip()) if ext_id is not None else None
+    idmap = ensure_idmap(S)
+    gid = idmap.get(plat, {}).get(str(ext_id).strip()) if ext_id is not None else None
     if gid and (gid in S.season_tot or gid in S.players):
         return gid
     if name:
@@ -2420,7 +2465,7 @@ def sync_page(S, store, owner, teams, season):
     with t_sl:
         st.caption("Sleeper leagues are public, so all it takes is your Sleeper username.")
         with st.form("sl_user"):
-            un = st.text_input("Sleeper username")
+            un = text_in("Sleeper username", "off")
             go_ = st.form_submit_button("Find my leagues", type="primary")
         if go_ and un.strip():
             try:
@@ -2448,7 +2493,7 @@ def sync_page(S, store, owner, teams, season):
           f'shared with this site.</div>')
         site = site_url()
         if not site:
-            site = st.text_input("This site's address", placeholder="https://your-app.streamlit.app").rstrip("/")
+            site = text_in("This site's address", "url", placeholder="https://your-app.streamlit.app").rstrip("/")
         if site:
             H('<div style="height:.5rem"></div>')
             bookmark_widget(site)
@@ -2468,8 +2513,8 @@ def sync_page(S, store, owner, teams, season):
             lid = c1.text_input("ESPN league ID")
             yr = c2.number_input("Season", 2018, 2100, int(season))
             with st.expander("Private league? (advanced: espn_s2 and SWID cookies)"):
-                s2 = st.text_input("espn_s2", type="password")
-                swid = st.text_input("SWID", placeholder="{XXXXXXXX-XXXX-...}")
+                s2 = text_in("espn_s2", "off", type="password")
+                swid = text_in("SWID", "off", placeholder="{XXXXXXXX-XXXX-...}")
             go_ = st.form_submit_button("Import", type="primary")
         if go_ and lid.strip().isdigit():
             with st.spinner("Importing league..."):
@@ -2811,8 +2856,8 @@ def auth_panel(db):
         t_in, t_up, t_fp = st.tabs(["Sign in", "Create account", "Forgot password"])
         with t_in:
             with st.form("signin"):
-                ident = st.text_input("Username or email")
-                pw = st.text_input("Password", type="password")
+                ident = text_in("Username or email", "username")
+                pw = text_in("Password", "current-password", type="password")
                 remember = st.checkbox("Keep me signed in on this device", value=True)
                 go_ = st.form_submit_button("Sign in", type="primary", use_container_width=True)
             if go_:
@@ -2829,10 +2874,10 @@ def auth_panel(db):
                     st.rerun()
         with t_up:
             with st.form("signup"):
-                un = st.text_input("Username", max_chars=20, help="3-20 letters, numbers, dots, dashes or underscores")
-                em = st.text_input("Email", help="Only used to recover your account. Never shown to anyone.")
-                p1 = st.text_input("Password", type="password", help="At least 8 characters, mixing letters and numbers")
-                p2 = st.text_input("Confirm password", type="password")
+                un = text_in("Username", "username", max_chars=20, help="3-20 letters, numbers, dots, dashes or underscores")
+                em = text_in("Email", "email", help="Only used to recover your account. Never shown to anyone.")
+                p1 = text_in("Password", "new-password", type="password", help="At least 8 characters, mixing letters and numbers")
+                p2 = text_in("Confirm password", "new-password", type="password")
                 go_ = st.form_submit_button("Create account", type="primary", use_container_width=True)
             if go_:
                 if p1 != p2:
@@ -2856,7 +2901,7 @@ def auth_panel(db):
             how = st.radio("How do you want to reset it?", options, horizontal=True, key="fp_how")
             if how == "Email me a code":
                 with st.form("fp_send"):
-                    ident = st.text_input("Username or email", key="fp_ident")
+                    ident = text_in("Username or email", "username", key="fp_ident")
                     send = st.form_submit_button("Send code")
                 if send:
                     try:
@@ -2868,9 +2913,9 @@ def auth_panel(db):
                     st.info(f"If an account matches, a 6-digit code is on its way to the email on file. "
                             f"It expires in {CODE_MINUTES} minutes; check spam too.")
                     with st.form("fp_code"):
-                        code = st.text_input("6-digit code", max_chars=7)
-                        n1 = st.text_input("New password", type="password")
-                        n2 = st.text_input("Confirm new password", type="password")
+                        code = text_in("6-digit code", "one-time-code", max_chars=7)
+                        n1 = text_in("New password", "new-password", type="password")
+                        n2 = text_in("Confirm new password", "new-password", type="password")
                         ok = st.form_submit_button("Reset password", type="primary")
                     if ok:
                         if n1 != n2:
@@ -2891,10 +2936,10 @@ def auth_panel(db):
                 if not mc:
                     st.caption("Use the recovery key you saved when you made your account.")
                 with st.form("fp_key"):
-                    ident = st.text_input("Username or email", key="fk_ident")
-                    key = st.text_input("Recovery key", placeholder="XXXXX-XXXXX-XXXXX-XXXXX")
-                    n1 = st.text_input("New password", type="password", key="fk_n1")
-                    n2 = st.text_input("Confirm new password", type="password", key="fk_n2")
+                    ident = text_in("Username or email", "username", key="fk_ident")
+                    key = text_in("Recovery key", "off", placeholder="XXXXX-XXXXX-XXXXX-XXXXX")
+                    n1 = text_in("New password", "new-password", type="password", key="fk_n1")
+                    n2 = text_in("Confirm new password", "new-password", type="password", key="fk_n2")
                     ok = st.form_submit_button("Reset password", type="primary")
                 if ok:
                     if n1 != n2:
@@ -2923,12 +2968,16 @@ def account_settings(db):
     acc = Accounts(db)
     with st.expander(f"⚙️ Account settings · signed in as {a['display_name']}"):
         st.caption(f"Email on file: {a['email']}")
+        remembered = read_cookie() and read_cookie() == st.session_state.get("_token")
+        st.caption("✅ This device stays signed in." if remembered else
+                   "This device will ask you to sign in next visit. Sign out and back in with "
+                   "'Keep me signed in' checked to remember it.")
         t1, t2, t3, t4 = st.tabs(["Password", "Email", "Recovery key", "Delete account"])
         with t1:
             with st.form("chpw"):
-                cur = st.text_input("Current password", type="password")
-                n1 = st.text_input("New password", type="password")
-                n2 = st.text_input("Confirm new password", type="password")
+                cur = text_in("Current password", "current-password", type="password")
+                n1 = text_in("New password", "new-password", type="password")
+                n2 = text_in("Confirm new password", "new-password", type="password")
                 ok = st.form_submit_button("Change password")
             if ok:
                 try:
@@ -2940,8 +2989,8 @@ def account_settings(db):
                     st.error(str(e))
         with t2:
             with st.form("chem"):
-                em = st.text_input("New email", value=a["email"])
-                cur = st.text_input("Current password", type="password", key="chem_pw")
+                em = text_in("New email", "email", value=a["email"])
+                cur = text_in("Current password", "current-password", type="password", key="chem_pw")
                 ok = st.form_submit_button("Update email")
             if ok:
                 try:
@@ -2952,7 +3001,7 @@ def account_settings(db):
         with t3:
             st.caption("Lost your recovery key? Make a new one. The old key stops working.")
             with st.form("newkey"):
-                cur = st.text_input("Current password", type="password", key="nk_pw")
+                cur = text_in("Current password", "current-password", type="password", key="nk_pw")
                 ok = st.form_submit_button("Create a new recovery key")
             if ok:
                 done = False
@@ -2966,8 +3015,8 @@ def account_settings(db):
         with t4:
             st.caption("Permanently deletes your account and every saved team.")
             with st.form("delacct"):
-                confirm = st.text_input(f"Type your username ({a['display_name']}) to confirm")
-                cur = st.text_input("Current password", type="password", key="del_pw")
+                confirm = text_in(f"Type your username ({a['display_name']}) to confirm", "off")
+                cur = text_in("Current password", "current-password", type="password", key="del_pw")
                 ok = st.form_submit_button("Delete my account")
             if ok:
                 if confirm.strip().lower() != a["username"]:
