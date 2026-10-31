@@ -128,6 +128,11 @@ div[data-testid="stDataFrame"] {{border: 1px solid {BORDER}; border-radius: 12px
 .fr-list .num {{font-weight: 800; white-space: nowrap;}}
 .fr-cardh {{font-size: .74rem; text-transform: uppercase; letter-spacing: .09em; font-weight: 800; margin-bottom: .2rem;}}
 .fr-cardd {{font-size: .78rem; color: {MUTED}; margin-bottom: .35rem;}}
+.fr-glgrid {{display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: .5rem;}}
+.fr-gl {{background: {CARD}; border: 1px solid {BORDER}; border-radius: 10px; padding: .55rem .75rem; font-size: .8rem;
+        color: {MUTED}; line-height: 1.4;}}
+.fr-gl b {{color: {TEXT}; display: block; font-size: .82rem; margin-bottom: .1rem;}}
+.fr-wk img {{display: block; margin: .25rem auto .1rem;}}
 .fr-foot {{color: {DIM}; font-size: .76rem; margin-top: 2.2rem; text-align: center; line-height: 1.6;}}
 </style>
 """
@@ -173,6 +178,78 @@ def matchup_info(rank, n):
 
 def team_cols(team):
     return TEAM_COLORS.get(team or "", ("#1e293b", GOLD))
+
+
+ESPN_ABBR = {"WAS": "wsh", "LA": "lar", "LAR": "lar"}
+
+
+def logo_url(team):
+    if not team:
+        return None
+    t = str(team).upper()
+    return f"https://a.espncdn.com/i/teamlogos/nfl/500/{ESPN_ABBR.get(t, t.lower())}.png"
+
+
+def logo(team, size=20, style=""):
+    u = logo_url(team)
+    return (f'<img src="{u}" alt="" style="width:{size}px;height:{size}px;object-fit:contain;'
+            f'vertical-align:middle;{style}">') if u else ""
+
+
+GLOSSARY = {
+    "PPG": "Fantasy points per game.",
+    "Total pts": "Fantasy points for the whole season.",
+    "xFP": "Expected fantasy points: what an average player would score with the same targets, carries, "
+           "depth of target and field position. The most stable measure of opportunity.",
+    "+/- exp": "Points over expected per game: actual points minus xFP. Positive = scoring more than his usage predicts.",
+    "TD luck": "The part of +/- exp that comes from scoring more (or fewer) touchdowns than his usage predicts. "
+               "This is the part that tends to even out, so it drives the buy-low / sell-high lists.",
+    "Finish": "Where he ranked at his position that week (WR12 = 12th-best WR).",
+    "Snap %": "Share of his team's offensive plays he was on the field for.",
+    "Route %": "Share of his team's pass plays he was on the field for (how often he runs a route).",
+    "Target share": "Share of his team's targets that went to him.",
+    "Air yards share": "Share of his team's air yards (how far passes travel past the line) thrown his way.",
+    "WOPR": "Weighted opportunity rating: 1.5 × target share + 0.7 × air yards share. "
+            "The best single predictor of receiver fantasy output.",
+    "YPRR": "Yards per route run. The best efficiency stat for receivers.",
+    "TPRR": "Targets per route run: how often he's thrown to when he runs a route.",
+    "aDOT": "Average depth of target: how far downfield his targets travel. A style stat, not good or bad.",
+    "Drop %": "Charted drops divided by catchable targets.",
+    "RZ": "Red zone: inside the opponent's 20-yard line.",
+    "EZ tgt": "End-zone targets: passes thrown into the end zone to him.",
+    "Opportunities/G": "Carries plus targets per game.",
+    "Rush share": "Share of his team's carries.",
+    "HVT": "High-value touches: targets plus carries inside the 10. These score the most fantasy points.",
+    "Inside-10 share": "Share of his team's carries inside the opponent's 10-yard line (goal-line role).",
+    "YPC": "Yards per carry.",
+    "EPA": "Expected points added: how much a play changed his team's expected scoring. Above 0 is good.",
+    "Stuff %": "Share of carries stopped at or behind the line of scrimmage.",
+    "Dropbacks/G": "Pass plays per game, including sacks and scrambles.",
+    "EPA/dropback": "Expected points added per pass play. The best single QB efficiency stat.",
+    "CPOE": "Completion percentage over expected, based on how difficult each throw was.",
+    "ANY/A": "Adjusted net yards per attempt: passing yards with bonuses for TDs and penalties for INTs and sacks.",
+    "Sack %": "Share of dropbacks that end in a sack.",
+    "INT %": "Share of pass attempts intercepted.",
+    "Implied total": "Points Vegas expects his team to score, from the spread and the game total.",
+    "Spread": "Vegas point spread for his team. Negative = favored.",
+    "Defense rank": "Where a defense ranks in fantasy points allowed to a position. "
+                    "1 = allows the most = best matchup for your player.",
+    "PROE": "Pass rate over expected: how much more (or less) a team passes than normal in neutral game situations.",
+    "Boom / bust": "Boom = a big week (20+ for RB/WR, 25+ QB, 15+ TE). Bust = under 8 (12 QB, 6 TE).",
+    "Floor / ceiling": "His 25th and 75th percentile weekly scores: a bad week and a good week.",
+}
+POS_TERMS = {
+    "WR": ["Target share", "Air yards share", "WOPR", "Route %", "YPRR", "TPRR", "aDOT", "Drop %"],
+    "TE": ["Target share", "Air yards share", "WOPR", "Route %", "YPRR", "TPRR", "aDOT", "Drop %"],
+    "RB": ["Opportunities/G", "Rush share", "HVT", "Inside-10 share", "Target share", "YPC", "EPA", "Stuff %"],
+    "QB": ["Dropbacks/G", "EPA/dropback", "CPOE", "ANY/A", "Sack %", "INT %"],
+}
+
+
+def glossary(terms, title="What the abbreviations mean"):
+    items = "".join(f'<div class="fr-gl"><b>{esc(t)}</b><span>{esc(GLOSSARY[t])}</span></div>'
+                    for t in terms if t in GLOSSARY)
+    H(f'<div class="fr-sec" style="margin-top:2rem">{esc(title)}</div><div class="fr-glgrid">{items}</div>')
 
 
 def plink(pid, text):
@@ -234,22 +311,26 @@ def get_player_list(_S, key):
 @st.cache_resource(ttl=pr.CACHE_HOURS * 3600, max_entries=4, show_spinner=False)
 def get_home(_S, key):
     S = _S
-    out = {"fpoe": [], "trend": [], "week_top": [], "matchups": {}, "next_week": None}
+    out = {"luck": [], "trend": [], "week_top": {}, "season_top": {}, "matchups": {}, "next_week": None}
     for pos in pr.FANTASY_POS:
         pool, _ = pr.position_pool(S, pos)
         for pid, m in pool.items():
             t = S.season_tot[pid]
             base = {"pid": pid, "name": t["name"], "pos": pos, "team": t["team"], "ppg": m["ppg"]}
-            if m.get("fpoe_pg") is not None and (m.get("xfp_pg") or 0) >= 7 and m.get("xfp_games", 0) >= 3:
-                out["fpoe"].append({**base, "val": m["fpoe_pg"], "xfp": m["xfp_pg"]})
+            if m.get("regress_pg") is not None and (m.get("xfp_pg") or 0) >= 7 and m.get("xfp_games", 0) >= 4:
+                out["luck"].append({**base, "val": m["regress_pg"], "td_oe": m["td_oe_pg"], "xfp": m["xfp_pg"],
+                                    "act_td": m["act_td_xweeks"] + (m["act_pass_td_xweeks"] if pos == "QB" else 0),
+                                    "exp_td": (m["exp_td"] or 0) + ((m["exp_pass_td"] or 0) if pos == "QB" else 0)})
             weeks = pr.player_weeks(S, pid)
             if len(weeks) >= 4 and m.get("xfp_pg") is not None:
                 l3 = pr.player_metrics(S, pid, pos, weeks[-3:])
                 if l3.get("xfp_pg") is not None:
                     out["trend"].append({**base, "val": l3["xfp_pg"] - m["xfp_pg"], "l3": l3["xfp_pg"],
                                          "season": m["xfp_pg"]})
-    rows = [r for rs in S.weekly.values() for r in rs if r["week"] == S.last_week]
-    out["week_top"] = sorted(rows, key=lambda r: -r["pts"])[:12]
+        out["week_top"][pos] = sorted([r for rs in S.weekly.values() for r in rs
+                                       if r["week"] == S.last_week and r["pos"] == pos], key=lambda r: -r["pts"])[:5]
+        out["season_top"][pos] = sorted([(pid, t) for pid, t in S.season_tot.items() if t["pos"] == pos],
+                                        key=lambda x: -x[1]["pts"])[:5]
     upcoming = sorted({g["week"] for g in S.schedule if g["home_score"] is None})
     if upcoming:
         nw = upcoming[0]
@@ -361,11 +442,13 @@ def hero(rep):
     H(f"""
     <div class="fr-hero" style="background: linear-gradient(115deg, {c1} 0%, {c1}cc 38%, {CARD} 100%);
          border-left: 6px solid {c2};">
+      <div style="display:flex;gap:1rem;align-items:center">
+      {logo(rep["team"], 76, "filter:drop-shadow(0 2px 6px rgba(0,0,0,.45))")}
       <div>
         <div class="nm">{esc(rep['name'])}</div>
         <div>{chip_html}</div>
         <div class="meta">{esc(meta)}</div>
-      </div>
+      </div></div>
       <div class="fr-badge"><div class="big" style="color:{tier_color(rk) if rk else TEXT}">{pos}{rk if rk else "–"}</div>
         <div class="lab">PPG rank</div></div>
     </div>""")
@@ -395,10 +478,10 @@ def kpi_grid(rep):
         bg = G_BG if d >= 1 else R_BG if d <= -1 else BORDER
         trend = (f'<span class="fr-pill" style="background:{bg};color:{col}">{"▲" if d >= 0 else "▼"} {abs(d):.1f}'
                  f'</span> last 3 games')
-    f = m.get("fpoe_pg")
+    f, tdo = m.get("fpoe_pg"), m.get("td_oe_pg")
     f_col = GREEN if (f or 0) >= 1 else RED if (f or 0) <= -1 else TEXT
-    f_sub = ("Running hot: sell-high zone" if (f or 0) >= 3 else "Under-producing usage: buy-low"
-             if (f or 0) <= -2 else "Production matches usage" if f is not None else "&nbsp;")
+    f_sub = f"{tdo:+.1f} from TD luck · {f - tdo:+.1f} efficiency" if (f is not None and tdo is not None) else \
+        ("Production matches usage" if f is not None else "&nbsp;")
     key_usage = {"WR": ("tgt_share", "Target share", "pct"), "TE": ("tgt_share", "Target share", "pct"),
                  "RB": ("opp_pg", "Opportunities / game", "dec1"),
                  "QB": ("p_epa_per_db", "EPA / dropback", "dec2s")}[pos]
@@ -476,9 +559,11 @@ def weekly_rows(rep):
     out = []
     for w in rep["weekly"]:
         if w.get("status"):
-            out.append({"Wk": w["week"], "Opp": w["status"]})
+            out.append({"Week": w["week"], "Logo": None, "Opponent": w["status"]})
             continue
-        r = {"Wk": w["week"], "Opp": w.get("opp", ""), "Pts": round(w.get("pts") or 0, 1),
+        opp_abbr = (w.get("opp") or "").split()[-1] if w.get("opp") else None
+        r = {"Week": w["week"], "Logo": logo_url(opp_abbr), "Opponent": w.get("opp", ""),
+             "Pts": round(w.get("pts") or 0, 1),
              "Finish": f"{pos}{w['rank']}" if w.get("rank") else "–",
              "xFP": round(w["xfp"], 1) if w.get("xfp") is not None else None,
              "+/-": round(w["fpoe"], 1) if w.get("fpoe") is not None else None,
@@ -522,10 +607,9 @@ def num_sign_color(v):
 
 def tab_weekly(rep):
     df = pd.DataFrame(weekly_rows(rep))
-    styled_df(df, row_bg=lambda r: "rgba(100,116,139,.12)" if r.get("Opp") in ("BYE", "Did not play") else None,
-              cell={"Finish": finish_color, "+/-": num_sign_color})
-    st.caption("Finish = positional rank that week. xFP = expected points from usage; +/- = actual minus expected. "
-               "Route% = share of team dropbacks he was on the field for. HVT = targets + carries inside the 10.")
+    styled_df(df, row_bg=lambda r: "rgba(100,116,139,.12)" if r.get("Opponent") in ("BYE", "Did not play") else None,
+              cell={"Finish": finish_color, "+/-": num_sign_color},
+              column_config={"Logo": st.column_config.ImageColumn(" ", width="small")})
     sec("Usage by week")
     plot(usage_chart(rep))
     sec("Trends: last 3 games vs season")
@@ -558,9 +642,9 @@ def tab_matchups(rep):
         H(f"""
         <div class="fr-game">
           <div class="fr-sub" style="margin:0 0 .5rem">NEXT GAME · WEEK {nx['week']}{' · ' + esc(when) if when else ''}</div>
-          <div class="teams"><span class="fr-tm" style="background:{t1};--s:{t1s}">{esc(rep['team'])}</span>
+          <div class="teams">{logo(rep['team'], 40)}<span class="fr-tm" style="background:{t1};--s:{t1s}">{esc(rep['team'])}</span>
             <span style="color:{MUTED};font-weight:700">{'vs' if nx['home'] else '@'}</span>
-            <span class="fr-tm" style="background:{t2};--s:{t2s}">{esc(nx['opp'])}</span>
+            {logo(nx['opp'], 40)}<span class="fr-tm" style="background:{t2};--s:{t2s}">{esc(nx['opp'])}</span>
             <span class="fr-pill" style="background:{BORDER};color:{col};margin-left:auto;font-size:.82rem">{lab} matchup</span>
           </div>
         </div>""")
@@ -584,11 +668,11 @@ def tab_matchups(rep):
         for wk, u in items:
             if u is None:
                 tiles.append(f'<div class="fr-wk" style="--c:{SLATE}"><div class="w">Week {wk}</div>'
-                             f'<div class="o">BYE</div><div class="r">&nbsp;</div></div>')
+                             f'<div style="height:34px"></div><div class="o">BYE</div><div class="r">&nbsp;</div></div>')
                 continue
             lab, col = matchup_info(u.get("fpa_rank"), u.get("fpa_n"))
             tiles.append(f'<div class="fr-wk" style="--c:{col}"><div class="w">Week {wk}{" ★" if u["playoff"] else ""}</div>'
-                         f'<div class="o">{esc(u["label"])}</div>'
+                         f'{logo(u["opp"], 30)}<div class="o">{esc(u["label"])}</div>'
                          f'<div class="r">{pr.ordinal(u["fpa_rank"]) if u.get("fpa_rank") else "–"} · {lab}</div></div>')
         H(f'<div class="fr-sched">{"".join(tiles)}</div>')
         bits = []
@@ -763,6 +847,9 @@ def page_player(S):
     for t, fn in zip(tabs, (tab_overview, tab_weekly, tab_matchups, tab_ranks, tab_splits, tab_plays)):
         with t:
             fn(rep)
+    glossary(["xFP", "+/- exp", "TD luck", "Finish", "Snap %", "Route %", "Boom / bust", "Floor / ceiling",
+              "Implied total", "Spread", "Defense rank", "PROE", "RZ", "EZ tgt", "HVT", "EPA"]
+             + POS_TERMS[rep["pos"]])
     st.divider()
     pdf_button(rep)
 
@@ -773,12 +860,15 @@ def page_player(S):
 
 def list_card(title, desc, color, items):
     body = "".join(items) if items else '<div class="fr-sub" style="padding:.5rem 0">Not enough data yet.</div>'
-    return (f'<div class="fr-card" style="border-top:3px solid {color}"><div class="fr-cardh" style="color:{color}">'
-            f'{esc(title)}</div><div class="fr-cardd">{esc(desc)}</div><div class="fr-list">{body}</div></div>')
+    head = f'<div class="fr-cardh" style="color:{color}">{esc(title)}</div>'
+    if desc:
+        head += f'<div class="fr-cardd">{esc(desc)}</div>'
+    return f'<div class="fr-card" style="border-top:3px solid {color}">{head}<div class="fr-list">{body}</div></div>'
 
 
-def list_item(pid, name, sub, num, color):
-    return (f'<div class="it"><div>{plink(pid, name)}<div class="sm">{esc(sub)}</div></div>'
+def list_item(pid, name, sub, num, color, team=None):
+    return (f'<div class="it"><div style="display:flex;gap:.55rem;align-items:center">{logo(team, 24)}'
+            f'<div>{plink(pid, name)}<div class="sm">{esc(sub)}</div></div></div>'
             f'<div class="num" style="color:{color}">{esc(num)}</div></div>')
 
 
@@ -792,37 +882,28 @@ def page_home(S):
         st.rerun()
     with st.spinner("Crunching the league..."):
         d = get_home(S, skey(S))
-    fp, tr = d["fpoe"], d["trend"]
-    buy = sorted(fp, key=lambda x: x["val"])[:6]
-    sell = sorted(fp, key=lambda x: -x["val"])[:6]
-    rising = sorted([x for x in tr if x["val"] > 0], key=lambda x: -x["val"])[:6]
-    falling = sorted([x for x in tr if x["val"] < 0], key=lambda x: x["val"])[:6]
 
-    def sub_fp(x):
-        return f"{x['pos']} · {x['team']} · {x['ppg']:.1f} PPG on {x['xfp']:.1f} expected"
+    # 1. Last week's leaders
+    sec(f"Week {S.last_week} leaders")
+    cards = []
+    for pos in pr.FANTASY_POS:
+        its = [list_item(r["pid"], r["name"], f"{pos}{r.get('rank', '')} · {r['team']}"
+                                              f"{' vs ' + r['opp'] if r.get('opp') else ''}",
+                         f"{r['pts']:.1f}", tier_color(r.get("rank")), r["team"]) for r in d["week_top"][pos]]
+        cards.append(list_card(f"{pos}s", "", GOLD, its))
+    H(f'<div class="fr-grid">{"".join(cards)}</div>')
 
-    def sub_tr(x):
-        return f"{x['pos']} · {x['team']} · {x['l3']:.1f} xFP last 3 vs {x['season']:.1f}"
-    sec("Buy, sell and trends")
-    H('<div class="fr-grid g2">' + "".join([
-        list_card("Buy low", "Scoring well below what his usage predicts", GREEN,
-                  [list_item(x["pid"], x["name"], sub_fp(x), f"{x['val']:+.1f}", GREEN) for x in buy]),
-        list_card("Sell high", "Scoring well above what his usage predicts", RED,
-                  [list_item(x["pid"], x["name"], sub_fp(x), f"{x['val']:+.1f}", RED) for x in sell]),
-        list_card("Usage rising", "Expected points, last 3 games vs season", BLUE,
-                  [list_item(x["pid"], x["name"], sub_tr(x), f"▲ {x['val']:.1f}", BLUE) for x in rising]),
-        list_card("Usage falling", "Expected points, last 3 games vs season", AMBER,
-                  [list_item(x["pid"], x["name"], sub_tr(x), f"▼ {abs(x['val']):.1f}", AMBER) for x in falling]),
-    ]) + "</div>")
+    # 2. Season leaders
+    sec("Season leaders (total points)")
+    cards = []
+    for pos in pr.FANTASY_POS:
+        its = [list_item(pid, t["name"], f"{t['team']} · {t['games']} games · {t['ppg']:.1f} PPG",
+                         f"{t['pts']:.1f}", tier_color(t.get("rank_total")), t["team"])
+               for pid, t in d["season_top"][pos]]
+        cards.append(list_card(f"{pos}s", "", BLUE, its))
+    H(f'<div class="fr-grid">{"".join(cards)}</div>')
 
-    sec(f"Week {S.last_week} top scorers")
-    items = [list_item(r["pid"], r["name"], f"{r['pos']}{r.get('rank', '')} · {r['team']}"
-                                            f"{' vs ' + r['opp'] if r.get('opp') else ''}",
-                       f"{r['pts']:.1f}", tier_color(r.get("rank"))) for r in d["week_top"]]
-    half = (len(items) + 1) // 2
-    H(f'<div class="fr-grid g2"><div class="fr-card"><div class="fr-list">{"".join(items[:half])}</div></div>'
-      f'<div class="fr-card"><div class="fr-list">{"".join(items[half:])}</div></div></div>')
-
+    # 3. Next week's matchups
     if d["next_week"]:
         sec(f"Best matchups in week {d['next_week']}")
         cards = []
@@ -830,13 +911,49 @@ def page_home(S):
             its = []
             for x in d["matchups"].get(pos, []):
                 lab, col = matchup_info(x["rank"], x["n"])
-                its.append(f'<div class="it"><div><b style="color:{TEXT}">{esc(x["off"])} {pos}s</b>'
-                           f'<div class="sm">vs {esc(x["def"])} · allows {x["avg"]:.1f} / game</div></div>'
+                its.append(f'<div class="it"><div style="display:flex;gap:.55rem;align-items:center">{logo(x["off"], 24)}'
+                           f'<div><b style="color:{TEXT}">{esc(x["off"])} {pos}s</b>'
+                           f'<div class="sm">vs {esc(x["def"])} defense · allows {x["avg"]:.1f} / game</div></div></div>'
                            f'<div class="num" style="color:{col}">{pr.ordinal(x["rank"])}</div></div>')
-            cards.append(list_card(f"{pos}s", "Facing the defenses that allow the most", GOLD, its))
+            cards.append(list_card(f"{pos}s", "", GREEN, its))
         H(f'<div class="fr-grid">{"".join(cards)}</div>')
-    H('<div class="fr-foot">Buy/sell lists include players averaging 7+ expected points. Tap any name to open his '
-      'report.</div>')
+        H(f'<div class="fr-sub" style="margin-top:.4rem">Number = where that defense ranks in points allowed to the '
+          f'position (1st = most allowed).</div>')
+
+    # 4. Usage trends
+    tr = d["trend"]
+    rising = sorted([x for x in tr if x["val"] > 0], key=lambda x: -x["val"])[:6]
+    falling = sorted([x for x in tr if x["val"] < 0], key=lambda x: x["val"])[:6]
+
+    def sub_tr(x):
+        return f"{x['pos']} · {x['team']} · {x['l3']:.1f} xFP last 3 vs {x['season']:.1f} season"
+    sec("Usage trends (role changes show up here first)")
+    H('<div class="fr-grid g2">' + "".join([
+        list_card("Usage rising", "Expected points from his usage, last 3 games vs season", BLUE,
+                  [list_item(x["pid"], x["name"], sub_tr(x), f"▲ {x['val']:.1f}", BLUE, x["team"]) for x in rising]),
+        list_card("Usage falling", "Expected points from his usage, last 3 games vs season", AMBER,
+                  [list_item(x["pid"], x["name"], sub_tr(x), f"▼ {abs(x['val']):.1f}", AMBER, x["team"])
+                   for x in falling]),
+    ]) + "</div>")
+
+    # 5. TD luck: buy low / sell high
+    lk = d["luck"]
+    buy = sorted([x for x in lk if x["val"] <= -1.0], key=lambda x: x["val"])[:6]
+    sell = sorted([x for x in lk if x["val"] >= 1.5], key=lambda x: -x["val"])[:6]
+
+    def sub_lk(x):
+        return f"{x['pos']} · {x['team']} · {int(x['act_td'])} TDs on {x['exp_td']:.1f} expected"
+    sec("Buy low / sell high (touchdown luck)")
+    H('<div class="fr-grid g2">' + "".join([
+        list_card("Buy low", "Scoring fewer TDs than his usage predicts. Expect more.", GREEN,
+                  [list_item(x["pid"], x["name"], sub_lk(x), f"{x['val']:+.1f}", GREEN, x["team"]) for x in buy]),
+        list_card("Sell high", "Scoring more TDs than his usage predicts. Expect fewer.", RED,
+                  [list_item(x["pid"], x["name"], sub_lk(x), f"{x['val']:+.1f}", RED, x["team"]) for x in sell]),
+    ]) + "</div>")
+    H('<div class="fr-sub" style="margin-top:.4rem">Number = points per game likely to come back (buy) or fade (sell): '
+      'TD luck plus a small share of efficiency. Players who simply beat their usage through skill (catch rate, '
+      'yards after catch) are not listed here. Includes players averaging 7+ expected points over 4+ games.</div>')
+    glossary(["xFP", "TD luck", "+/- exp", "PPG", "Defense rank"])
 
 
 # ------------------------------------------------------------------------------------
@@ -844,17 +961,18 @@ def page_home(S):
 # ------------------------------------------------------------------------------------
 
 RANK_COLS = {
-    "WR": [("Tgt share", "tgt_share", 100), ("Air share", "air_share", 100), ("WOPR", "wopr", 1),
+    "WR": [("Target share", "tgt_share", 100), ("Air yards share", "air_share", 100), ("WOPR", "wopr", 1),
            ("Route %", "route_pct", 100), ("YPRR", "yprr", 1), ("TPRR", "tprr", 100), ("aDOT", "r_adot", 1),
            ("Drop %", "r_drop_rate", 100)],
-    "RB": [("Opp / g", "opp_pg", 1), ("Rush share", "rush_share", 100), ("HVT / g", "hvt_pg", 1),
-           ("Inside-10 sh", "i10_share", 100), ("Tgt share", "tgt_share", 100), ("YPC", "ru_ypc", 1),
-           ("Rush EPA", "ru_epa_per", 1), ("Stuff %", "ru_stuff_rate", 100)],
-    "QB": [("Dropbacks / g", "p_dropbacks_pg", 1), ("EPA / DB", "p_epa_per_db", 1), ("CPOE", "p_cpoe", 1),
-           ("ANY/A", "p_any_a", 1), ("Rush yds / g", "rush_ypg", 1), ("Scrambles / g", "p_scrambles_pg", 1),
+    "RB": [("Opportunities/G", "opp_pg", 1), ("Rush share", "rush_share", 100), ("HVT/G", "hvt_pg", 1),
+           ("Inside-10 share", "i10_share", 100), ("Target share", "tgt_share", 100), ("YPC", "ru_ypc", 1),
+           ("EPA/rush", "ru_epa_per", 1), ("Stuff %", "ru_stuff_rate", 100)],
+    "QB": [("Dropbacks/G", "p_dropbacks_pg", 1), ("EPA/dropback", "p_epa_per_db", 1), ("CPOE", "p_cpoe", 1),
+           ("ANY/A", "p_any_a", 1), ("Rush yds/G", "rush_ypg", 1), ("Scrambles/G", "p_scrambles_pg", 1),
            ("Sack %", "p_sack_rate", 100), ("INT %", "p_int_rate", 100)],
 }
 RANK_COLS["TE"] = RANK_COLS["WR"]
+RANK_BY = {"Total points": "Total pts", "Points per game": "PPG", "Expected points": "xFP/G"}
 
 
 def segmented(label, options, key, default, fmt_fn=None):
@@ -872,18 +990,22 @@ def segmented(label, options, key, default, fmt_fn=None):
 
 
 def page_rankings(S):
-    H('<div class="fr-title">Rankings</div><div class="fr-sub">Sorted by points per game. Tap a column header to '
-      'sort, tap a row to open his report. Sort by <b>+/- exp</b> to find buy-low (most negative) and sell-high '
-      '(most positive) players.</div>')
+    H('<div class="fr-title">Rankings</div><div class="fr-sub">Tap a column header to re-sort, tap a row to open '
+      'his report.</div>')
     H('<div style="height:.6rem"></div>')
-    pos = segmented("Position", list(pr.FANTASY_POS), "rank_pos", "WR")
+    c1, c2 = st.columns([1, 1.4])
+    with c1:
+        pos = segmented("Position", list(pr.FANTASY_POS), "rank_pos", "WR")
+    with c2:
+        by = segmented("Rank by", list(RANK_BY), "rank_by", "Total points", lambda o: f"Rank by {o.lower()}")
     with st.spinner("Ranking players..."):
         pool, _ = pr.position_pool(S, pos)
     rows = []
     for pid, m in pool.items():
         t = S.season_tot.get(pid, {})
-        r = {"pid": pid, "Player": t.get("name"), "Team": t.get("team"), "G": m["games"], "PPG": m.get("ppg"),
-             "xFP/G": m.get("xfp_pg"), "+/- exp": m.get("fpoe_pg"), "Snap %": m.get("snap_pct")}
+        r = {"pid": pid, "Logo": logo_url(t.get("team")), "Player": t.get("name"), "Team": t.get("team"),
+             "Games": m["games"], "Total pts": t.get("pts"), "PPG": m.get("ppg"), "xFP/G": m.get("xfp_pg"),
+             "+/- exp": m.get("fpoe_pg"), "TD luck/G": m.get("td_oe_pg"), "Snap %": m.get("snap_pct")}
         for lab, key, mult in RANK_COLS[pos]:
             v = m.get(key)
             r[lab] = v * mult if v is not None else None
@@ -894,35 +1016,44 @@ def page_rankings(S):
     teams = sorted({r["Team"] for r in rows if r["Team"]})
     pick = st.multiselect("Teams", teams, default=[], placeholder="Filter by team (optional)",
                           label_visibility="collapsed")
-    df = pd.DataFrame(rows).sort_values("PPG", ascending=False).reset_index(drop=True)
-    df.insert(1, "Rk", range(1, len(df) + 1))
+    sort_col = RANK_BY[by]
+    df = pd.DataFrame(rows).sort_values(sort_col, ascending=False, na_position="last").reset_index(drop=True)
+    df.insert(1, "Rank", range(1, len(df) + 1))
     if pick:
         df = df[df["Team"].isin(pick)].reset_index(drop=True)
-    cfg = {"pid": None, "Rk": st.column_config.NumberColumn(width="small"),
+    cfg = {"pid": None, "Rank": st.column_config.NumberColumn("Rank", width="small"),
+           "Logo": st.column_config.ImageColumn(" ", width="small"),
+           "Total pts": st.column_config.NumberColumn(format="%.1f"),
            "PPG": st.column_config.NumberColumn(format="%.1f"), "xFP/G": st.column_config.NumberColumn(format="%.1f"),
            "+/- exp": st.column_config.NumberColumn(format="%+.1f", help="Points over expected per game"),
+           "TD luck/G": st.column_config.NumberColumn(format="%+.1f", help="Points per game from TD luck"),
            "Snap %": st.column_config.NumberColumn(format="%.0f%%")}
     for lab, key, mult in RANK_COLS[pos]:
         cfg[lab] = st.column_config.NumberColumn(format="%.0f%%" if mult == 100 else "%.2f")
-    sty = smap(df.style, lambda v: f"color: {tier_color(v)}; font-weight: 800" if pd.notna(v) else "", ["Rk"])
+    sty = smap(df.style, lambda v: f"color: {tier_color(v)}; font-weight: 800" if pd.notna(v) else "", ["Rank"])
     sty = smap(sty, lambda v: (f"color: {GREEN}" if v >= 1 else f"color: {RED}" if v <= -1 else "")
-               if pd.notna(v) else "", ["+/- exp"])
+               if pd.notna(v) else "", ["+/- exp", "TD luck/G"])
+    sty = smap(sty, lambda v: "font-weight: 800", [sort_col])
     try:
         ev = st.dataframe(sty, use_container_width=True, hide_index=True, column_config=cfg, height=640,
-                          on_select="rerun", selection_mode="single-row", key=f"rank_table_{pos}")
+                          on_select="rerun", selection_mode="single-row", key=f"rank_table_{pos}_{by}")
         sel = ev.selection.rows if ev is not None and hasattr(ev, "selection") else []
     except TypeError:
         st.dataframe(sty, use_container_width=True, hide_index=True, column_config=cfg, height=640)
         sel = []
-    st.caption(f"{len(df)} {pos}s with {S.min_games}+ games and real volume. Rank colour: green top 12, blue 13-24, "
-               "gold 25-36.")
+    note = {"Total points": "Total points rewards availability, like your league's standings.",
+            "Points per game": "Points per game ignores missed games, so players with fewer games can rank high.",
+            "Expected points": "Expected points ranks by usage alone, the most stable predictor of future scoring."}[by]
+    st.caption(f"{len(df)} {pos}s with {S.min_games}+ games and real volume. {note} "
+               "Rank colour: green top 12, blue 13-24, gold 25-36.")
     if sel:
         st.session_state.pending = {"player": df.iloc[sel[0]]["pid"], "view": "Player"}
         st.rerun()
+    glossary(["Total pts", "PPG", "xFP", "+/- exp", "TD luck", "Snap %"] + POS_TERMS[pos])
 
 
 def page_defense(S):
-    H(f'<div class="fr-title">Defense vs position</div><div class="fr-sub">Fantasy points allowed per game '
+    H(f'<div class="fr-title">Defense vs position</div><div class="fr-sub">Average fantasy points allowed per game '
       f'({pr.FORMAT_LABEL[S.fmt_name]}). Rank 1 = allows the most = best matchup for your players. '
       f'Green = attack, red = avoid.</div>')
     H('<div style="height:.6rem"></div>')
@@ -930,14 +1061,14 @@ def page_defense(S):
     n = len(teams)
     rows = []
     for t in teams:
-        r = {"Defense": t}
+        r = {"Logo": logo_url(t), "Defense": t}
         for pos in pr.FANTASY_POS:
             f = S.fpa.get((t, pos), {})
-            r[pos] = f.get("avg")
-            r[f"{pos} rk"] = f.get("rank")
+            r[f"{pos} pts"] = f.get("avg")
+            r[f"{pos} rank"] = f.get("rank")
         rows.append(r)
     sort_pos = segmented("Sort by", list(pr.FANTASY_POS), "def_pos", "WR", lambda p: f"Sort by {p}")
-    df = pd.DataFrame(rows).sort_values(f"{sort_pos} rk").reset_index(drop=True)
+    df = pd.DataFrame(rows).sort_values(f"{sort_pos} rank").reset_index(drop=True)
 
     def heat(v):
         if pd.isna(v):
@@ -946,10 +1077,15 @@ def page_defense(S):
         a = abs(0.5 - x) * 0.9
         rgb = "34,197,94" if x <= 0.5 else "239,68,68"
         return f"background-color: rgba({rgb},{a:.2f}); font-weight: 700"
-    rk_cols = [c for c in df.columns if c.endswith(" rk")]
-    sty = df.style.format(precision=1, na_rep="").format("{:.0f}", subset=rk_cols, na_rep="")
+    rk_cols = [c for c in df.columns if c.endswith(" rank")]
+    pts_cols = [c for c in df.columns if c.endswith(" pts")]
+    sty = df.style.format("{:.1f}", subset=pts_cols, na_rep="").format("{:.0f}", subset=rk_cols, na_rep="")
     sty = smap(sty, heat, rk_cols)
-    st.dataframe(sty, use_container_width=True, hide_index=True, height=40 + 35 * len(df))
+    st.dataframe(sty, use_container_width=True, hide_index=True, height=40 + 35 * len(df),
+                 column_config={"Logo": st.column_config.ImageColumn(" ", width="small")})
+    glossary(["Defense rank"], "How to read this")
+    H('<div class="fr-sub">"QB pts" = average fantasy points per game that defense has allowed to quarterbacks; '
+      '"QB rank" = where that ranks among all defenses. Same for RB, WR and TE.</div>')
 
 
 # ------------------------------------------------------------------------------------

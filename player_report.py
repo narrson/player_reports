@@ -828,6 +828,17 @@ def player_metrics(S, pid, pos, weeks=None):
     exp_weeks = {w for w in weeks if (pid, w) in S.xfp}
     m["act_td_xweeks"] = sum(wk_rows[w]["rec_td"] + wk_rows[w]["rush_td"] for w in exp_weeks if w in wk_rows)
     m["act_pass_td_xweeks"] = sum(wk_rows[w]["pass_td"] for w in exp_weeks if w in wk_rows)
+
+    # Split points-over-expected into TD luck (fades) and efficiency (mostly skill, sticks).
+    m["td_oe_pg"] = m["eff_oe_pg"] = m["regress_pg"] = None
+    if m["exp_td"] is not None and m["xfp_games"]:
+        td_oe = (m["act_td_xweeks"] - m["exp_td"]) * sc["rush_td"]
+        if pos == "QB" and m["exp_pass_td"] is not None:
+            td_oe += (m["act_pass_td_xweeks"] - m["exp_pass_td"]) * sc["pass_td"]
+        m["td_oe_pg"] = td_oe / m["xfp_games"]
+        if m["fpoe_pg"] is not None:
+            m["eff_oe_pg"] = m["fpoe_pg"] - m["td_oe_pg"]
+            m["regress_pg"] = m["td_oe_pg"] + 0.35 * m["eff_oe_pg"]
     return m
 
 
@@ -1417,16 +1428,23 @@ def build_insights(rep):
         tier = f"{pos}{(r - 1) // 12 + 1}" if r <= 48 else "outside the top 48"
         add(10, "info", f"{pos}{r} in points per game ({p['ppg']:.1f} PPG) among {pc[1]} {pos}s with "
                         f"{rep['min_games']}+ games, which is {tier} production.")
-    f = m.get("fpoe_pg")
+    f, rg, tdo = m.get("fpoe_pg"), m.get("regress_pg"), m.get("td_oe_pg")
     if f is not None and m.get("xfp_games", 0) >= 3:
-        if f <= -2:
-            add(9, "up", f"Scoring {abs(f):.1f} fewer points per game than his usage predicts "
-                         f"({m['xfp_pg']:.1f} expected vs {p['ppg']:.1f} actual). The opportunity is there; "
-                         f"efficiency and TDs tend to catch up. Classic buy-low profile.")
+        if rg is not None and rg <= -2:
+            add(9, "up", f"Scoring {f:+.1f} points per game versus what his usage predicts "
+                         f"({m['xfp_pg']:.1f} expected, {p['ppg']:.1f} actual), largely from touchdown luck "
+                         f"running against him. Usage like his usually produces more. Buy-low profile.")
+        elif rg is not None and rg >= 2.5:
+            add(8, "down", f"Outscoring his usage by {f:.1f} points per game, and {tdo:+.1f} of that comes from "
+                           f"scoring more touchdowns than his usage predicts. TD luck tends to fade. "
+                           f"Sell-high candidate if the price is right.")
         elif f >= 3:
-            add(8, "down", f"Scoring {f:.1f} more points per game than his usage predicts "
-                           f"({m['xfp_pg']:.1f} expected). Some of that is likely unsustainable efficiency "
-                           f"or TD luck. Sell-high candidate if the price is right.")
+            add(5, "info", f"Outscoring his usage by {f:.1f} points per game mostly through efficiency (catch rate, "
+                           f"yards after catch, big plays) rather than TD luck. Elite efficiency is largely skill "
+                           f"and usually holds up, so this isn't a sell signal on its own.")
+        elif f <= -3:
+            add(6, "info", f"Scoring {abs(f):.1f} fewer points per game than his usage predicts, mostly from "
+                           f"inefficiency rather than bad TD luck. The volume is there; watch whether he converts it.")
         elif abs(f) < 1:
             add(3, "info", f"Production matches his usage almost exactly ({m['xfp_pg']:.1f} expected PPG), "
                            f"so what you see is what you get.")
