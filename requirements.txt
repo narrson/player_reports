@@ -1,6 +1,7 @@
-streamlit>=1.40
+streamlit>=1.45
 nflreadpy
 polars
 pandas
 plotly
 reportlab
+requests

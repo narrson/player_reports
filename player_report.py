@@ -1539,6 +1539,180 @@ def build_insights(rep):
 
 
 # ------------------------------------------------------------------------------------
+# Weekly projections (start/sit, compare, team analysis)
+# ------------------------------------------------------------------------------------
+
+POS_SD = {"QB": 7.0, "RB": 6.5, "WR": 6.5, "TE": 5.0}
+INJURY_FACTOR = {"out": 0.0, "injured reserve": 0.0, "ir": 0.0, "doubtful": 0.25, "questionable": 0.9}
+
+
+def _clamp(x, lo, hi):
+    return max(lo, min(hi, x))
+
+
+def _norm_cdf(z):
+    return 0.5 * (1 + math.erf(z / math.sqrt(2)))
+
+
+def team_game(S, team, week):
+    for gm in S.schedule:
+        if gm["week"] == week and team in (gm["home"], gm["away"]):
+            return gm
+    return None
+
+
+def next_week(S):
+    up = sorted({gm["week"] for gm in S.schedule if gm["home_score"] is None})
+    return up[0] if up else None
+
+
+def _week_implied_mean(S, week):
+    if not hasattr(S, "_imp_mean"):
+        S._imp_mean = {}
+    if week not in S._imp_mean:
+        vals = []
+        for gm in S.schedule:
+            if gm["week"] == week and gm["total"] is not None and gm["spread"] is not None:
+                h = (gm["total"] + gm["spread"]) / 2
+                vals += [h, gm["total"] - h]
+        S._imp_mean[week] = mean(vals) or 22.5
+    return S._imp_mean[week]
+
+
+def player_base(S, pid):
+    """Usage-driven points per game before matchup: blended expected points plus the sticky part of efficiency."""
+    if not hasattr(S, "_base"):
+        S._base = {}
+    if pid in S._base:
+        return S._base[pid]
+    tot = S.season_tot.get(pid, {})
+    pos = tot.get("pos") or (S.players.get(pid) or {}).get("pos")
+    if pos not in FANTASY_POS:
+        S._base[pid] = None
+        return None
+    weeks = player_weeks(S, pid)
+    pool = S._pool.get(pos, ({}, 0))[0]
+    m = pool.get(pid) or player_metrics(S, pid, pos, weeks)
+    l3 = player_metrics(S, pid, pos, weeks[-3:]) if len(weeks) >= 4 else None
+    xs, xl = m.get("xfp_pg"), (l3 or {}).get("xfp_pg")
+    if xs is not None:
+        x = 0.55 * xs + 0.45 * xl if xl is not None else xs
+        eff = (m.get("eff_oe_pg") or 0) * 0.5 * min(1.0, m["games"] / 8)
+        base = max(0.0, x + eff)
+        src = "usage"
+    else:
+        ppg, l3p = m.get("ppg"), (l3 or {}).get("ppg")
+        base = (0.6 * ppg + 0.4 * l3p) if (ppg is not None and l3p is not None) else (ppg or 0.0)
+        src = "scoring"
+    pts = [r["pts"] for r in S.weekly.get(pid, [])]
+    sd_p = statistics.pstdev(pts) if len(pts) > 1 else POS_SD[pos]
+    n = len(pts)
+    sd = (sd_p * n + POS_SD[pos] * 4) / (n + 4)
+    out = {"pid": pid, "pos": pos, "m": m, "base": base, "xfp_season": xs, "xfp_last3": xl, "src": src, "sd": sd,
+           "games": m["games"]}
+    S._base[pid] = out
+    return out
+
+
+def project_player(S, pid, week=None, injuries=True):
+    """Projected fantasy points for one week with floor, ceiling and the reasons behind it."""
+    b = player_base(S, pid)
+    if b is None:
+        return None
+    week = week or next_week(S)
+    pos, team = b["pos"], player_team(S, pid)
+    name = (S.players.get(pid) or {}).get("name") or S.season_tot.get(pid, {}).get("name") or pid
+    out = {"pid": pid, "name": name, "pos": pos, "team": team, "week": week, "base": b["base"], "bye": False,
+           "opp": None, "home": None, "label": "", "implied": None, "fpa_rank": None, "fpa_n": None,
+           "inj_status": None, "reasons": []}
+    gm = team_game(S, team, week) if (team and week) else None
+    if week and not gm:
+        out.update(bye=True, proj=0.0, floor=0.0, ceiling=0.0, boom_prob=0.0, label="BYE")
+        out["reasons"].append(("down", f"On bye in week {week}."))
+        return out
+    mf = vf = injf = 1.0
+    if gm:
+        home = gm["home"] == team
+        opp = gm["away"] if home else gm["home"]
+        out.update(opp=opp, home=home, label=f"{'vs' if home else '@'} {opp}")
+        f = S.fpa.get((opp, pos))
+        avg = S.fpa_avg.get(pos)
+        if f and avg:
+            w = min(1.0, f["games"] / 6)
+            mf = _clamp(1 + 0.5 * w * (f["avg"] / avg - 1), 0.85, 1.15)
+            out.update(fpa_rank=f["rank"], fpa_n=f["n"])
+        if gm["total"] is not None and gm["spread"] is not None:
+            h = (gm["total"] + gm["spread"]) / 2
+            imp = h if home else gm["total"] - h
+            out["implied"] = imp
+            vf = _clamp(1 + 0.4 * (imp / _week_implied_mean(S, week) - 1), 0.88, 1.12)
+    inj = S.injuries.get(pid)
+    if injuries and inj and inj.get("status") and inj["week"] >= S.last_week:
+        st_ = str(inj["status"]).lower()
+        injf = next((v for k, v in INJURY_FACTOR.items() if k in st_), 1.0)
+        out["inj_status"] = inj["status"] + (f" ({inj['injury']})" if inj.get("injury") else "")
+    proj = b["base"] * mf * vf * injf
+    sd = b["sd"] * (proj / b["base"] if b["base"] > 0 else 1) if injf > 0 else 0
+    boom = BOOM_BUST[pos][0]
+    out.update(proj=proj, floor=max(0.0, proj - 0.84 * sd), ceiling=proj + 0.84 * sd, sd=sd,
+               boom_prob=(1 - _norm_cdf((boom - proj) / sd)) if sd > 0 else 0.0, mf=mf, vf=vf, injf=injf)
+    if b["xfp_season"] is not None:
+        txt = f"Usage worth {b['xfp_season']:.1f} expected points per game"
+        if b["xfp_last3"] is not None:
+            txt += f" ({b['xfp_last3']:.1f} over the last 3)"
+        tone = "up" if (b["xfp_last3"] or 0) > b["xfp_season"] + 2 else \
+            "down" if b["xfp_last3"] is not None and b["xfp_last3"] < b["xfp_season"] - 2 else "info"
+        out["reasons"].append((tone, txt + "."))
+    else:
+        out["reasons"].append(("info", f"Based on {b['games']} game(s) of scoring (no usage model yet)."))
+    eff = b["m"].get("eff_oe_pg")
+    if eff is not None and abs(eff) >= 1.5:
+        out["reasons"].append(("up" if eff > 0 else "down",
+                               f"{'Beats' if eff > 0 else 'Trails'} his usage by {abs(eff):.1f} pts/game through "
+                               f"efficiency; half of that is carried forward."))
+    if out["fpa_rank"]:
+        pctv = int(round((mf - 1) * 100))
+        out["reasons"].append(("up" if mf > 1.02 else "down" if mf < 0.98 else "info",
+                               f"{out['opp']} allows the {ordinal(out['fpa_rank'])}-most points to {pos}s "
+                               f"({pctv:+d}% matchup adjustment)."))
+    if out["implied"] is not None:
+        out["reasons"].append(("up" if vf > 1.02 else "down" if vf < 0.98 else "info",
+                               f"Vegas implies {out['implied']:.1f} points for {team} ({int(round((vf - 1) * 100)):+d}%)."))
+    if out["inj_status"]:
+        out["reasons"].append(("down", f"Injury report: {out['inj_status']} ({int(round((injf - 1) * 100)):+d}%)."))
+    return out
+
+
+def ros_value(S, pid, through=None):
+    """Projected points for the rest of the fantasy regular season and playoffs (matchups included)."""
+    b = player_base(S, pid)
+    if b is None:
+        return 0.0
+    nw = next_week(S)
+    if not nw:
+        return 0.0
+    last = through or FANTASY_PLAYOFF_WEEKS[-1]
+    tot = 0.0
+    for w in range(nw, last + 1):
+        p = project_player(S, pid, w, injuries=(w == nw))
+        if p:
+            tot += p["proj"]
+    return tot
+
+
+def position_projections(S, pos, week=None):
+    """Projections for every qualified player at a position (used for baselines and trade targets)."""
+    if not hasattr(S, "_posproj"):
+        S._posproj = {}
+    key = (pos, week)
+    if key not in S._posproj:
+        pool, _ = position_pool(S, pos)
+        S._posproj[key] = sorted([p for p in (project_player(S, pid, week) for pid in pool) if p],
+                                 key=lambda p: -p["proj"])
+    return S._posproj[key]
+
+
+# ------------------------------------------------------------------------------------
 # Console + CSV output
 # ------------------------------------------------------------------------------------
 
