@@ -1493,20 +1493,77 @@ def read_cookie():
         return None
 
 
+AUTH_HTML = """<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0"><script>
+(function(){
+  var KEY = "fr_session", last = null;
+  function post(m){ m.isStreamlitMessage = true; window.parent.postMessage(m, "*"); }
+  function read(){ try { return localStorage.getItem(KEY) || ""; } catch (e) { return ""; } }
+  window.addEventListener("message", function(ev){
+    var d = ev.data;
+    if (!d || d.type !== "streamlit:render") return;
+    var a = d.args || {}, sig = JSON.stringify(a);
+    if (sig === last) return;
+    last = sig;
+    try {
+      if (a.op === "set" && a.token) {
+        localStorage.setItem(KEY, a.token);
+        var exp = Date.now() + (a.days || 30) * 86400000;
+        localStorage.setItem(KEY + "_exp", String(exp));
+      } else if (a.op === "clear") {
+        localStorage.removeItem(KEY); localStorage.removeItem(KEY + "_exp");
+      }
+    } catch (e) {}
+    var tok = read();
+    try { var exp2 = +localStorage.getItem(KEY + "_exp"); if (exp2 && exp2 < Date.now()) { tok = ""; } } catch (e) {}
+    post({ type: "streamlit:setComponentValue", value: { token: tok, n: a.n || 0, ok: true }, dataType: "json" });
+  });
+  post({ type: "streamlit:componentReady", apiVersion: 1 });
+  post({ type: "streamlit:setFrameHeight", height: 0 });
+})();
+</script></body></html>"""
+
+
+@st.cache_resource(show_spinner=False)
+def _auth_component():
+    import streamlit.components.v1 as components
+    d = os.path.join(tempfile.gettempdir(), "fr_auth_store_v1")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "index.html"), "w", encoding="utf-8") as f:
+        f.write(AUTH_HTML)
+    return components.declare_component("fr_auth_store", path=d)
+
+
+def device_store():
+    """Invisible helper that keeps the sign-in token in this browser's local storage. Returns
+    {"token": ...} once the browser has answered, or None on the very first moment of a visit."""
+    op = st.session_state.pop("_store_op", None)
+    if op:
+        st.session_state._store_args = {"op": op[0], "token": op[1], "days": op[2] if len(op) > 2 else 30,
+                                        "n": int(datetime.now().timestamp() * 1000)}
+    try:
+        return _auth_component()(key="fr_auth_store", default=None, **st.session_state.get("_store_args", {}))
+    except Exception:
+        return {"token": "", "ok": False}
+
+
 def restore_session():
-    """On each visit: apply pending cookie changes, and sign back in from the cookie if possible."""
+    """On each visit: keep the browser's saved sign-in in sync, and sign back in from it."""
     op = st.session_state.pop("_cookie_op", None)
     if op:
         write_cookie(*op)
+    if not get_db():
+        st.session_state._store_ready = True
+        return
+    val = device_store()
+    st.session_state._store_ready = val is not None
     if st.session_state.get("account") or st.session_state.get("_signed_out"):
         return
-    db = get_db()
-    tok = read_cookie()
-    if not db or not tok or st.session_state.get("_cookie_checked") == tok:
+    tok = ((val or {}).get("token") or "") or (read_cookie() or "")
+    if not tok or st.session_state.get("_cookie_checked") == tok:
         return
     st.session_state._cookie_checked = tok
     try:
-        a = Accounts(db).session_account(tok)
+        a = Accounts(get_db()).session_account(tok)
     except Exception:
         return
     if a:
@@ -1521,6 +1578,7 @@ def start_session(db, a, remember):
     st.session_state._token = tok
     st.session_state.pop("_signed_out", None)
     st.session_state._cookie_op = (tok, days)
+    st.session_state._store_op = ("set", tok, days)
 
 
 def sign_out():
@@ -1534,6 +1592,7 @@ def sign_out():
         st.session_state.pop(k, None)
     st.session_state._signed_out = True
     st.session_state._cookie_op = (None, 0)
+    st.session_state._store_op = ("clear", "")
 
 
 class TeamStore:
@@ -2968,7 +3027,8 @@ def account_settings(db):
     acc = Accounts(db)
     with st.expander(f"⚙️ Account settings · signed in as {a['display_name']}"):
         st.caption(f"Email on file: {a['email']}")
-        remembered = read_cookie() and read_cookie() == st.session_state.get("_token")
+        saved = (st.session_state.get("fr_auth_store") or {}).get("token")
+        remembered = bool(st.session_state.get("_token")) and st.session_state.get("_token") in (saved, read_cookie())
         st.caption("✅ This device stays signed in." if remembered else
                    "This device will ask you to sign in next visit. Sign out and back in with "
                    "'Keep me signed in' checked to remember it.")
@@ -3048,6 +3108,14 @@ def teams_login_gate():
         if a:
             show_recovery_key()
             return a["id"], TeamStore(db)
+        if not st.session_state.get("_store_ready") and not st.session_state.get("_skip_wait"):
+            H(f'<div class="fr-card" style="text-align:center;padding:1.6rem 1rem;max-width:520px;margin:1rem auto">'
+              f'<div class="fr-sub">Checking if this device is signed in...</div></div>')
+            _, mid, _ = st.columns([1, 1, 1])
+            if mid.button("Sign in manually", use_container_width=True):
+                st.session_state._skip_wait = True
+                st.rerun()
+            return None, None
         auth_panel(db)
         return None, None
     H(f'<div class="fr-card" style="border-left:4px solid {AMBER};margin-bottom:.8rem"><b style="color:{TEXT}">'
