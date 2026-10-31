@@ -2,7 +2,7 @@
 Fantasy Player Reports: website version.
 
 Run on your computer:   streamlit run app.py
-Host it for free:       Streamlit Community Cloud (see the setup steps Claude gave you)
+Host it for free:       Streamlit Community Cloud
 
 All the stats come from player_report.py, which must sit in the same folder.
 """
