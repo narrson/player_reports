@@ -10,6 +10,7 @@ All the stats come from player_report.py, which must sit in the same folder.
 
 import base64
 import difflib
+import math
 import hashlib
 import hmac
 import html
@@ -17,7 +18,7 @@ import re
 import os
 import secrets as pysecrets
 import tempfile
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
@@ -1599,7 +1600,8 @@ def grade_for(ratio):
     return "F", RED
 
 
-def analyze_team(S, team):
+def analyze_team(S, team, owner_of=None, my_team_id=None):
+    """owner_of: {pid: team dict} for every rostered player in the league (league mode)."""
     slots = {**DEFAULT_SLOTS, **(team.get("slots") or {})}
     n_teams = int(team.get("teams_in_league") or 12)
     week = pr.next_week(S)
@@ -1691,12 +1693,15 @@ def analyze_team(S, team):
         for p in pr.position_projections(S, pos, week):
             if p["pid"] in on_roster:
                 continue
+            if owner_of is not None and (p["pid"] not in owner_of or owner_of[p["pid"]]["id"] == my_team_id):
+                continue  # league mode: trade targets must be on someone else's roster
             m = pr.player_base(S, p["pid"])["m"]
             worst = min([x["proj"] for x in out["grades"][pos]["players"]] or [0])
             if pr.player_base(S, p["pid"])["base"] <= worst:
                 continue
             cands.append({"pid": p["pid"], "p": p, "m": m, "ros": pr.ros_value(S, p["pid"]),
-                          "buy_low": (m.get("regress_pg") or 0) <= -1.0})
+                          "buy_low": (m.get("regress_pg") or 0) <= -1.0,
+                          "owner": (owner_of or {}).get(p["pid"], {}).get("name")})
         cands.sort(key=lambda c: (not c["buy_low"], -c["ros"]))
         out["targets"][pos] = cands[:6]
     chips = {c["pid"]: c for c in out["sell"] + out["surplus"]}.values()
@@ -1964,6 +1969,801 @@ def page_compare(S):
             plot(fig)
             st.caption("Each spoke is a league percentile (outer edge = best at his position).")
     glossary(["xFP", "+/- exp", "TD luck", "Floor / ceiling", "Boom / bust", "Implied total", "Defense rank"])
+
+
+# ------------------------------------------------------------------------------------
+# League sync: Sleeper (public API), ESPN (API, or the bookmark for private leagues),
+# Yahoo (the bookmark reads your logged-in league pages and sends the rosters here)
+# ------------------------------------------------------------------------------------
+
+SLEEPER_API = "https://api.sleeper.app/v1"
+ESPN_API = "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/{season}/segments/0/leagues/{lid}"
+PLATFORM_LABEL = {"sleeper": "Sleeper", "espn": "ESPN", "yahoo": "Yahoo", "manual": "Manual"}
+SLEEPER_SLOTS = {"QB": "QB", "RB": "RB", "WR": "WR", "TE": "TE", "FLEX": "FLEX", "WRRB_FLEX": "FLEX",
+                 "REC_FLEX": "FLEX", "SUPER_FLEX": "SUPERFLEX"}
+ESPN_SLOTS = {"0": "QB", "2": "RB", "4": "WR", "6": "TE", "23": "FLEX", "3": "FLEX", "5": "FLEX", "7": "SUPERFLEX"}
+SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
+
+
+def norm_name(n):
+    w = re.sub(r"[^a-z0-9 ]", "", str(n or "").lower().replace("-", " ")).split()
+    return " ".join(x for x in w if x not in SUFFIXES)
+
+
+@st.cache_resource(ttl=pr.CACHE_HOURS * 3600, max_entries=4, show_spinner=False)
+def name_index(_S, key):
+    idx = defaultdict(list)
+    for pid, p in _S.players.items():
+        if p.get("pos") in pr.FANTASY_POS and p.get("name"):
+            idx[norm_name(p["name"])].append(pid)
+    for k in idx:
+        idx[k].sort(key=lambda pid: -(_S.season_tot.get(pid, {}).get("pts") or -1))
+    return idx
+
+
+def map_player(S, plat, ext_id, name=None):
+    gid = S.idmap.get(plat, {}).get(str(ext_id).strip()) if ext_id is not None else None
+    if gid and (gid in S.season_tot or gid in S.players):
+        return gid
+    if name:
+        cands = name_index(S, skey(S)).get(norm_name(name), [])
+        if cands:
+            return cands[0]
+    return None
+
+
+def http_json(url, params=None, cookies=None):
+    import requests
+    r = requests.get(url, params=params, cookies=cookies, timeout=25,
+                     headers={"User-Agent": "Mozilla/5.0 (FantasyReports)", "Accept": "application/json"})
+    if r.status_code in (401, 403):
+        raise PermissionError("This league is private.")
+    if r.status_code == 404:
+        raise LookupError("Not found. Check the ID.")
+    r.raise_for_status()
+    return r.json()
+
+
+def fmt_for_rec(rec):
+    rec = float(rec or 0)
+    return "ppr" if rec >= 0.75 else "half" if rec >= 0.25 else "standard"
+
+
+def _finish_league(league):
+    league["kind"] = "league"
+    league["teams_in_league"] = len(league["teams"])
+    league["synced_at"] = _now().isoformat()
+    my = league.get("my_team")
+    if my is not None and str(my) not in {t["id"] for t in league["teams"]}:
+        league["my_team"] = None
+    league["name"] = league.get("name") or f"{PLATFORM_LABEL[league['platform']]} league"
+    return league
+
+
+# ----- Sleeper -----
+
+def sleeper_user_leagues(username, season):
+    user = http_json(f"{SLEEPER_API}/user/{username.strip()}")
+    if not user or not user.get("user_id"):
+        raise LookupError(f"No Sleeper user named '{username}'.")
+    leagues = http_json(f"{SLEEPER_API}/user/{user['user_id']}/leagues/nfl/{season}") or []
+    return user, leagues
+
+
+def sleeper_import(S, league_id, user_id=None):
+    lg = http_json(f"{SLEEPER_API}/league/{league_id}")
+    if not lg:
+        raise LookupError("Sleeper league not found.")
+    rosters = http_json(f"{SLEEPER_API}/league/{league_id}/rosters") or []
+    users = {u["user_id"]: u for u in (http_json(f"{SLEEPER_API}/league/{league_id}/users") or [])}
+    try:
+        week = (http_json(f"{SLEEPER_API}/state/nfl") or {}).get("week")
+        matchups = http_json(f"{SLEEPER_API}/league/{league_id}/matchups/{week}") if week else []
+    except Exception:
+        week, matchups = None, []
+    slots = {k: 0 for k in DEFAULT_SLOTS}
+    for rp in lg.get("roster_positions") or []:
+        if rp in SLEEPER_SLOTS:
+            slots[SLEEPER_SLOTS[rp]] += 1
+    rec = (lg.get("scoring_settings") or {}).get("rec", 0)
+    teams, my = [], None
+    for r in rosters:
+        u = users.get(r.get("owner_id"), {})
+        name = (u.get("metadata") or {}).get("team_name") or u.get("display_name") or f"Team {r['roster_id']}"
+        players, unmatched = [], 0
+        for sid in r.get("players") or []:
+            gid = map_player(S, "sleeper", sid)
+            if gid:
+                players.append(gid)
+            elif str(sid).isdigit():
+                unmatched += 1
+        stt = r.get("settings") or {}
+        teams.append({"id": str(r["roster_id"]), "name": name, "owner": u.get("display_name"),
+                      "players": list(dict.fromkeys(players)), "unmatched": unmatched,
+                      "starters": [g for g in (map_player(S, "sleeper", x) for x in r.get("starters") or []) if g],
+                      "record": [stt.get("wins", 0), stt.get("losses", 0), stt.get("ties", 0)]})
+        if user_id and r.get("owner_id") == user_id:
+            my = str(r["roster_id"])
+    opp = {}
+    by_mid = defaultdict(list)
+    for m in matchups or []:
+        if m.get("matchup_id") is not None:
+            by_mid[m["matchup_id"]].append(str(m["roster_id"]))
+    for ids in by_mid.values():
+        if len(ids) == 2:
+            opp[ids[0]], opp[ids[1]] = ids[1], ids[0]
+    return _finish_league({"platform": "sleeper", "league_id": str(league_id), "name": lg.get("name"),
+                           "season": int(lg.get("season") or S.season), "rec": rec, "scoring": fmt_for_rec(rec),
+                           "slots": slots, "teams": teams, "my_team": my, "opponents": opp, "week": week,
+                           "resync": {"type": "sleeper", "league_id": str(league_id), "user_id": user_id}})
+
+
+# ----- ESPN -----
+
+def espn_fetch(league_id, season, s2=None, swid=None):
+    cookies = {"espn_s2": s2, "SWID": swid} if (s2 and swid) else None
+    params = [("view", "mTeam"), ("view", "mRoster"), ("view", "mSettings"), ("view", "mMatchup")]
+    return http_json(ESPN_API.format(season=season, lid=league_id), params=params, cookies=cookies)
+
+
+def espn_from_json(S, data, league_id, season, my_team_id=None, swid=None):
+    st_ = data.get("settings") or {}
+    counts = (st_.get("rosterSettings") or {}).get("lineupSlotCounts") or {}
+    slots = {k: 0 for k in DEFAULT_SLOTS}
+    for k, n in counts.items():
+        if str(k) in ESPN_SLOTS:
+            slots[ESPN_SLOTS[str(k)]] += int(n or 0)
+    items = (st_.get("scoringSettings") or {}).get("scoringItems") or []
+    rec = next((i.get("points", 0) for i in items if i.get("statId") == 53), 0)
+    members = {m.get("id"): m.get("displayName") for m in data.get("members") or []}
+    teams, my = [], (str(my_team_id) if my_team_id else None)
+    for t in data.get("teams") or []:
+        name = t.get("name") or f"{t.get('location', '')} {t.get('nickname', '')}".strip() or f"Team {t.get('id')}"
+        owners = t.get("owners") or []
+        players, starters, unmatched = [], [], 0
+        for e in ((t.get("roster") or {}).get("entries") or []):
+            nm = (((e.get("playerPoolEntry") or {}).get("player")) or {}).get("fullName")
+            gid = map_player(S, "espn", e.get("playerId"), nm)
+            if gid:
+                players.append(gid)
+                if e.get("lineupSlotId") not in (20, 21):
+                    starters.append(gid)
+            elif nm and "D/ST" not in nm:
+                unmatched += 1
+        rec_ = ((t.get("record") or {}).get("overall")) or {}
+        teams.append({"id": str(t.get("id")), "name": name, "owner": members.get(owners[0]) if owners else None,
+                      "players": list(dict.fromkeys(players)), "starters": starters, "unmatched": unmatched,
+                      "record": [rec_.get("wins", 0), rec_.get("losses", 0), rec_.get("ties", 0)]})
+        if not my and swid and swid in owners:
+            my = str(t.get("id"))
+    per = (data.get("status") or {}).get("currentMatchupPeriod")
+    opp = {}
+    for g_ in data.get("schedule") or []:
+        if g_.get("matchupPeriodId") == per:
+            h, a = (g_.get("home") or {}).get("teamId"), (g_.get("away") or {}).get("teamId")
+            if h is not None and a is not None:
+                opp[str(h)], opp[str(a)] = str(a), str(h)
+    return _finish_league({"platform": "espn", "league_id": str(league_id), "name": st_.get("name"),
+                           "season": int(season), "rec": rec, "scoring": fmt_for_rec(rec), "slots": slots,
+                           "teams": teams, "my_team": my, "opponents": opp, "week": per,
+                           "resync": {"type": "espn", "league_id": str(league_id), "season": int(season)}})
+
+
+# ----- Yahoo (from the bookmark) -----
+
+def yahoo_from_payload(S, p):
+    teams = []
+    for t in p.get("teams") or []:
+        players, unmatched = [], 0
+        for item in t.get("players") or []:
+            yid, nm = (item + [None, None])[:2] if isinstance(item, list) else (item, None)
+            gid = map_player(S, "yahoo", yid, nm)
+            if gid:
+                players.append(gid)
+            else:
+                unmatched += 1
+        teams.append({"id": str(t.get("id")), "name": t.get("name") or f"Team {t.get('id')}", "owner": None,
+                      "players": list(dict.fromkeys(players)), "starters": [], "unmatched": unmatched,
+                      "record": None})
+    nm = (p.get("name") or "").replace("Yahoo Fantasy Football", "").strip(" -|") or None
+    return _finish_league({"platform": "yahoo", "league_id": str(p.get("league")), "name": nm,
+                           "season": S.season, "rec": 0.5, "scoring": "half", "slots": dict(DEFAULT_SLOTS),
+                           "teams": teams, "my_team": str(p["my"]) if p.get("my") else None, "opponents": {},
+                           "week": None, "resync": None})
+
+
+def decode_sync(code):
+    import json as _json
+    code = (code or "").strip()
+    if not code or len(code) > 400_000:
+        raise ValueError("That sync code is empty or too large.")
+    code += "=" * (-len(code) % 4)
+    try:
+        return _json.loads(base64.urlsafe_b64decode(code.encode()).decode("utf-8"))
+    except Exception:
+        raise ValueError("That sync code couldn't be read. Run the bookmark again.")
+
+
+def league_from_sync(S, payload):
+    src = payload.get("src")
+    if src == "sleeper":
+        return sleeper_import(S, payload["league"])
+    if src == "espn":
+        return espn_from_json(S, payload["data"], payload["league"], payload.get("season") or S.season,
+                              payload.get("my"))
+    if src == "yahoo":
+        return yahoo_from_payload(S, payload)
+    raise ValueError("Unknown sync source.")
+
+
+BOOKMARKLET_JS = r"""(async()=>{const SITE='__SITE__';
+const go=o=>{const b=btoa(unescape(encodeURIComponent(JSON.stringify(o)))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+try{navigator.clipboard.writeText(b)}catch(e){}
+const u=SITE+'/?sync='+b;if(u.length>60000){alert('Big league! The sync code was copied. Paste it on the site under Sync a league.');return}
+location.href=u};
+const h=location.hostname,p=location.pathname;
+try{
+if(h.includes('sleeper')){const m=p.match(/leagues\/(\d+)/);if(!m)return alert('Open your Sleeper league first, then tap this bookmark.');return go({src:'sleeper',league:m[1]})}
+if(h.includes('espn')){const q=new URLSearchParams(location.search);const lid=q.get('leagueId');if(!lid)return alert('Open your ESPN league or team page first.');
+const yr=q.get('seasonId')||new Date().getFullYear();
+const r=await fetch('https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/'+yr+'/segments/0/leagues/'+lid+'?view=mTeam&view=mRoster&view=mSettings&view=mMatchup',{credentials:'include'});
+if(!r.ok)return alert('ESPN returned '+r.status+'. Make sure you are logged in to ESPN.');
+const d=await r.json();const per=(d.status||{}).currentMatchupPeriod;const ss=d.settings||{};
+return go({src:'espn',league:lid,season:+yr,my:q.get('teamId'),data:{settings:{name:ss.name,rosterSettings:{lineupSlotCounts:(ss.rosterSettings||{}).lineupSlotCounts},scoringSettings:{scoringItems:((ss.scoringSettings||{}).scoringItems||[]).filter(i=>i.statId==53||i.statId==4).map(i=>({statId:i.statId,points:i.points}))}},
+members:(d.members||[]).map(m=>({id:m.id,displayName:m.displayName})),status:{currentMatchupPeriod:per},
+schedule:(d.schedule||[]).filter(s=>s.matchupPeriodId==per).map(s=>({matchupPeriodId:s.matchupPeriodId,home:{teamId:(s.home||{}).teamId},away:{teamId:(s.away||{}).teamId}})),
+teams:(d.teams||[]).map(t=>({id:t.id,name:t.name,location:t.location,nickname:t.nickname,owners:t.owners,record:{overall:((t.record||{}).overall)||{}},roster:{entries:((t.roster||{}).entries||[]).map(e=>({playerId:e.playerId,lineupSlotId:e.lineupSlotId,playerPoolEntry:{player:{fullName:(((e.playerPoolEntry||{}).player)||{}).fullName}}}))}}))}})}
+if(h.includes('yahoo')){const m=p.match(/\/f1\/(\d+)/);if(!m)return alert('Open your Yahoo fantasy football league first, then tap this bookmark.');const lid=m[1];
+const P=new DOMParser();const get=async u=>{const r=await fetch(u,{credentials:'include'});return P.parseFromString(await r.text(),'text/html')};
+const home=await get('/f1/'+lid);const names={};let my=null;const re=new RegExp('/f1/'+lid+'/(\\d+)/?$');
+home.querySelectorAll('a[href]').forEach(a=>{const mm=(a.getAttribute('href')||'').split('?')[0].match(re);if(!mm)return;const t=a.textContent.trim();
+if(/^my team$/i.test(t))my=mm[1];else if(t&&t.length<60&&(!names[mm[1]]||t.length>names[mm[1]].length))names[mm[1]]=t});
+const cur=p.match(new RegExp('/f1/'+lid+'/(\\d+)'));if(!my&&cur)my=cur[1];
+let ids=Object.keys(names);if(!ids.length)ids=Array.from({length:16},(_,i)=>String(i+1));
+const teams=[];for(const id of ids){const doc=await get('/f1/'+lid+'/'+id);const seen=new Set(),pl=[];
+doc.querySelectorAll('a[href*="/nfl/players/"]').forEach(a=>{const mm=(a.getAttribute('href')||'').match(/players\/(\d+)/);const t=a.textContent.trim();
+if(mm&&t.length>3&&!seen.has(mm[1])){seen.add(mm[1]);pl.push([mm[1],t])}});
+if(pl.length)teams.push({id:id,name:names[id]||('Team '+id),players:pl})}
+if(!teams.length)return alert('Could not read the rosters. Make sure you are logged in to Yahoo.');
+return go({src:'yahoo',league:lid,name:((home.querySelector('title')||{}).textContent||'').split('|')[0].trim(),my:my,teams:teams})}
+alert('Open your league on Yahoo, ESPN or Sleeper first, then tap this bookmark.')
+}catch(e){alert('Sync failed: '+e.message)}})();"""
+
+
+def site_url():
+    cfg = _secrets("site")
+    if cfg and cfg.get("url"):
+        return cfg["url"].rstrip("/")
+    try:
+        host = st.context.headers.get("Host")
+    except Exception:
+        host = None
+    if host:
+        local = host.startswith(("localhost", "127.", "0.0.0.0"))
+        return f"{'http' if local else 'https'}://{host}"
+    return None
+
+
+def bookmarklet(site):
+    js = " ".join(line.strip() for line in BOOKMARKLET_JS.replace("__SITE__", site).splitlines())
+    return "javascript:" + js
+
+
+def bookmark_widget(site):
+    import streamlit.components.v1 as components
+    bm = bookmarklet(site)
+    components.html(
+        f"""<div style="font-family:sans-serif;display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+        <a href="{esc(bm)}" onclick="event.preventDefault();alert('Drag this button to your bookmarks bar instead of clicking it.');"
+           style="display:inline-block;padding:12px 18px;border-radius:12px;background:#f5b301;color:#111;font-weight:800;
+           text-decoration:none;font-size:15px;cursor:grab">⚡ Sync to Fantasy Reports</a>
+        <span style="color:#8b98ad;font-size:13px">⬅ Drag this onto your bookmarks bar</span></div>""",
+        height=64)
+    with st.expander("Can't drag it? Make the bookmark by hand"):
+        st.caption("Bookmark any page, edit the bookmark, name it 'Sync to Fantasy Reports', and paste this as the URL. "
+                   "On a phone: make the bookmark on your computer first and let your browser sync it.")
+        st.code(bm, language=None)
+
+
+# ------------------------------------------------------------------------------------
+# League analysis
+# ------------------------------------------------------------------------------------
+
+def league_season(S, league, season):
+    fmt_ = league.get("scoring") or S.fmt_name
+    return S if fmt_ == S.fmt_name else get_season(season, fmt_)
+
+
+def team_strength(S, roster, slots, n_teams, week):
+    roster = [pid for pid in roster if pr.player_base(S, pid)]
+    projs = {pid: pr.project_player(S, pid, week) for pid in roster}
+    lineup, bench = optimal_lineup(projs, slots)
+    ros = {pid: pr.ros_value(S, pid) for pid in roster}
+    ros_projs = {pid: {**projs[pid], "proj": ros[pid]} for pid in roster if projs[pid]}
+    ros_lineup, _ = optimal_lineup(ros_projs, slots)
+    grades, surplus = {}, defaultdict(list)
+    for pos in pr.FANTASY_POS:
+        n = slots.get(pos, 0)
+        if not n:
+            continue
+        league_top = [p for p in pr.position_projections(S, pos, week) if not p["bye"]][: n_teams * n]
+        avg = mean([p["proj"] for p in league_top])
+        mine = [l["p"]["proj"] for l in lineup if l["slot"] == pos and l["p"]]
+        ratio = div(mean(mine) if mine else 0.0, avg) if avg else None
+        grades[pos] = {"ratio": ratio, "grade": grade_for(ratio)}
+        base_cut = league_top[-1]["proj"] if league_top else None
+        for b in bench:
+            if b["pos"] == pos and base_cut and pr.player_base(S, b["pid"])["base"] >= base_cut:
+                surplus[pos].append(b)
+    return {"lineup": lineup, "bench": bench, "projs": projs, "ros": ros, "grades": grades, "surplus": surplus,
+            "total": sum(l["p"]["proj"] for l in lineup if l["p"]),
+            "ros_total": sum(l["p"]["proj"] for l in ros_lineup if l["p"]),
+            "needs": sorted([p for p, g_ in grades.items() if g_["ratio"] is not None and g_["ratio"] < 1.0],
+                            key=lambda p: grades[p]["ratio"])}
+
+
+@st.cache_resource(ttl=pr.CACHE_HOURS * 3600, max_entries=40, show_spinner=False)
+def league_report(_S, key, _league):
+    S, league = _S, _league
+    week = pr.next_week(S)
+    slots = {**DEFAULT_SLOTS, **(league.get("slots") or {})}
+    n = league.get("teams_in_league") or len(league["teams"])
+    owner_of = {pid: t for t in league["teams"] for pid in t["players"]}
+    out = {"week": week, "teams": {}, "owner_of": owner_of}
+    for t in league["teams"]:
+        out["teams"][t["id"]] = team_strength(S, t["players"], slots, n, week)
+    my = league.get("my_team")
+    if my and my in out["teams"]:
+        me = next(t for t in league["teams"] if t["id"] == my)
+        out["mine"] = analyze_team(S, {"roster": me["players"], "slots": slots, "teams_in_league": n},
+                                   owner_of=owner_of, my_team_id=my)
+        out["partners"] = trade_partners(S, league, out, my)
+        out["waivers"] = waiver_targets(S, league, out, my)
+        opp = (league.get("opponents") or {}).get(my)
+        out["opponent"] = opp
+    return out
+
+
+def trade_partners(S, league, R, my):
+    mine = R["teams"][my]
+    names = {t["id"]: t["name"] for t in league["teams"]}
+    chips = {}
+    for pos, lst in mine["surplus"].items():
+        for b in lst:
+            chips[b["pid"]] = (b, "extra depth")
+    for x in (R.get("mine") or {}).get("sell", []):
+        if x["pid"] not in {l["p"]["pid"] for l in mine["lineup"] if l["p"]} or \
+                sum(1 for b in mine["bench"] if b["pos"] == x["p"]["pos"] and b["proj"] > 0):
+            chips.setdefault(x["pid"], (x["p"], "sell-high (TD luck)"))
+    ideas = []
+    for tid, T in R["teams"].items():
+        if tid == my:
+            continue
+        for need in mine["needs"]:
+            for theirs in T["surplus"].get(need, []):
+                for pid, (mp, why) in chips.items():
+                    if mp["pos"] not in T["needs"] or mp["pos"] == need:
+                        continue
+                    a, b = mine["ros"].get(pid) or 0, T["ros"].get(theirs["pid"]) or 0
+                    if a and b and 0.8 <= b / a <= 1.25:
+                        ideas.append({"team": names[tid], "give": mp, "give_why": why, "give_ros": a,
+                                      "get": theirs, "get_ros": b, "fit": f"they need {mp['pos']}, you need {need}",
+                                      "score": min(a, b)})
+    ideas.sort(key=lambda x: -x["score"])
+    seen, out = set(), []
+    for i in ideas:
+        k = (i["give"]["pid"], i["get"]["pid"])
+        if k not in seen:
+            seen.add(k)
+            out.append(i)
+    return out[:8]
+
+
+def waiver_targets(S, league, R, my):
+    owned = set(R["owner_of"])
+    mine = R["teams"][my]
+    week = R["week"]
+    out = {}
+    for pos in pr.FANTASY_POS:
+        if not (league.get("slots") or DEFAULT_SLOTS).get(pos) and pos not in ("RB", "WR", "TE"):
+            continue
+        worst = [l["p"]["proj"] for l in mine["lineup"] if l["p"] and l["p"]["pos"] == pos]
+        floor_ = min(worst) if worst else 0
+        fas = []
+        for pid, t in S.season_tot.items():
+            if t["pos"] != pos or pid in owned:
+                continue
+            p = pr.project_player(S, pid, week)
+            if not p or p["proj"] <= 0:
+                continue
+            b = pr.player_base(S, pid)
+            fas.append({"p": p, "ros": pr.ros_value(S, pid), "trend": (b["xfp_last3"] or 0) - (b["xfp_season"] or 0)
+                        if b["xfp_last3"] is not None and b["xfp_season"] is not None else None,
+                        "upgrade": p["proj"] - floor_})
+        fas.sort(key=lambda x: -x["ros"])
+        out[pos] = fas[:8]
+    return out
+
+
+def win_prob(my_lineup, opp_lineup):
+    a = sum(l["p"]["proj"] for l in my_lineup if l["p"])
+    b = sum(l["p"]["proj"] for l in opp_lineup if l["p"])
+    var = sum((l["p"].get("sd") or 0) ** 2 for l in my_lineup + opp_lineup if l["p"])
+    sd = math.sqrt(var) if var > 0 else 1.0
+    return a, b, pr._norm_cdf((a - b) / sd)
+
+
+# ------------------------------------------------------------------------------------
+# League pages
+# ------------------------------------------------------------------------------------
+
+def save_league(store, owner, league, existing_teams):
+    for t in existing_teams:
+        d = t["data"]
+        if d.get("kind") == "league" and d.get("platform") == league["platform"] and \
+                str(d.get("league_id")) == str(league["league_id"]):
+            if not league.get("my_team") and d.get("my_team"):
+                league["my_team"] = d["my_team"]
+            if league["platform"] == "yahoo":
+                league["scoring"], league["rec"] = d.get("scoring", league["scoring"]), d.get("rec", league["rec"])
+                league["slots"] = d.get("slots", league["slots"])
+            return store.save(owner, t["id"], league)
+    return store.save(owner, None, league)
+
+
+def sync_page(S, store, owner, teams, season):
+    H('<div class="fr-title">Sync a league</div><div class="fr-sub">Bring in your whole league: every team\'s roster, '
+      'your matchup, scoring and lineup settings. Re-sync anytime to pick up trades and waiver moves.</div>')
+    H('<div style="height:.6rem"></div>')
+    t_sl, t_bm, t_es, t_code = st.tabs(["🟣 Sleeper", "⚡ Yahoo (and any site)", "🔴 ESPN", "🔑 Paste a sync code"])
+    done = None
+    with t_sl:
+        st.caption("Sleeper leagues are public, so all it takes is your Sleeper username.")
+        with st.form("sl_user"):
+            un = st.text_input("Sleeper username")
+            go_ = st.form_submit_button("Find my leagues", type="primary")
+        if go_ and un.strip():
+            try:
+                user, lgs = sleeper_user_leagues(un, season)
+                st.session_state._sl_found = (user, lgs)
+            except Exception as e:
+                st.error(str(e))
+        found = st.session_state.get("_sl_found")
+        if found:
+            user, lgs = found
+            if not lgs:
+                st.info(f"No {season} NFL leagues found for {user.get('display_name')}.")
+            for lg in lgs:
+                c1, c2 = st.columns([4, 1])
+                c1.markdown(f"**{esc(lg.get('name') or 'League')}** · {lg.get('total_rosters', '?')} teams")
+                if c2.button("Import", key=f"sl_{lg['league_id']}", use_container_width=True):
+                    with st.spinner("Importing league..."):
+                        try:
+                            done = sleeper_import(S, lg["league_id"], user.get("user_id"))
+                        except Exception as e:
+                            st.error(f"Couldn't import: {e}")
+    with t_bm:
+        H(f'<div class="fr-sub">One-time setup on a computer. Works for <b>Yahoo</b>, ESPN (including private '
+          f'leagues) and Sleeper. It reads your league through your own logged-in browser, so no passwords are '
+          f'shared with this site.</div>')
+        site = site_url()
+        if not site:
+            site = st.text_input("This site's address", placeholder="https://your-app.streamlit.app").rstrip("/")
+        if site:
+            H('<div style="height:.5rem"></div>')
+            bookmark_widget(site)
+            H(notes_html([
+                ("info", "1. Drag the gold button to your bookmarks bar (press Ctrl+Shift+B in Brave if the bar is "
+                         "hidden)."),
+                ("info", "2. Open your league on Yahoo Fantasy (any league or team page) while logged in."),
+                ("info", "3. Click the bookmark. It reads every team's roster (about 10 seconds) and opens this site "
+                         "with your league ready to import."),
+                ("info", "4. To update after trades or waiver moves, click the bookmark again on Yahoo."),
+            ]))
+    with t_es:
+        st.caption("Public ESPN leagues import with just the league ID (the leagueId=... number in your ESPN league "
+                   "link). For a private league, use the ⚡ bookmark tab, which needs no extra setup.")
+        with st.form("espn"):
+            c1, c2 = st.columns([2, 1])
+            lid = c1.text_input("ESPN league ID")
+            yr = c2.number_input("Season", 2018, 2100, int(season))
+            with st.expander("Private league? (advanced: espn_s2 and SWID cookies)"):
+                s2 = st.text_input("espn_s2", type="password")
+                swid = st.text_input("SWID", placeholder="{XXXXXXXX-XXXX-...}")
+            go_ = st.form_submit_button("Import", type="primary")
+        if go_ and lid.strip().isdigit():
+            with st.spinner("Importing league..."):
+                try:
+                    data = espn_fetch(lid.strip(), int(yr), s2 or None, swid or None)
+                    done = espn_from_json(S, data, lid.strip(), int(yr), swid=swid or None)
+                except PermissionError:
+                    st.error("That league is private. Use the ⚡ bookmark tab (easiest), or enter espn_s2 and SWID.")
+                except Exception as e:
+                    st.error(f"Couldn't import: {e}")
+    with t_code:
+        st.caption("If the bookmark said it copied a sync code (very large leagues), paste it here.")
+        with st.form("code"):
+            code = st.text_area("Sync code", height=100)
+            go_ = st.form_submit_button("Import", type="primary")
+        if go_:
+            try:
+                done = league_from_sync(S, decode_sync(code))
+            except Exception as e:
+                st.error(str(e))
+    if done:
+        finish_import(store, owner, teams, done)
+    if st.button("← Back to my teams"):
+        st.session_state.team_mode = "view"
+        st.rerun()
+
+
+def finish_import(store, owner, teams, league):
+    if not league["teams"] or not any(t["players"] for t in league["teams"]):
+        st.error("No players could be read from that league. Try again, or tell Claude what you see.")
+        return
+    try:
+        tid = save_league(store, owner, league, teams)
+    except Exception as e:
+        st.error(f"Couldn't save the league: {e}")
+        return
+    st.session_state.team_sel = tid
+    st.session_state.team_mode = "view"
+    st.session_state.pop("_sl_found", None)
+    st.session_state._flash = f"Synced {league['name']}: {len(league['teams'])} teams."
+    list_teams.clear()
+    st.rerun()
+
+
+def handle_pending_sync(S, store, owner, teams):
+    code = st.session_state.get("_pending_sync")
+    if not code:
+        return False
+    try:
+        payload = decode_sync(code)
+        src = PLATFORM_LABEL.get(payload.get("src"), "your")
+    except ValueError as e:
+        st.error(str(e))
+        st.session_state.pop("_pending_sync", None)
+        return False
+    H(f'<div class="fr-card" style="border-left:5px solid {GOLD}"><div class="fr-cardh" style="color:{GOLD}">'
+      f'Ready to import</div><div style="font-weight:800;color:{TEXT};font-size:1.1rem">Your {esc(src)} league'
+      f'{" with " + str(len(payload.get("teams") or [])) + " teams" if payload.get("teams") else ""}</div></div>')
+    c1, c2, _ = st.columns([1, 1, 3])
+    if c1.button("Import league", type="primary", use_container_width=True):
+        st.session_state.pop("_pending_sync", None)
+        with st.spinner("Matching players..."):
+            try:
+                league = league_from_sync(S, payload)
+            except Exception as e:
+                st.error(f"Couldn't import: {e}")
+                return True
+        finish_import(store, owner, teams, league)
+    if c2.button("Cancel", use_container_width=True):
+        st.session_state.pop("_pending_sync", None)
+        st.rerun()
+    return True
+
+
+def resync(S, store, owner, row):
+    lg = row["data"]
+    rs = lg.get("resync") or {}
+    if rs.get("type") == "sleeper":
+        new = sleeper_import(S, rs["league_id"], rs.get("user_id"))
+    elif rs.get("type") == "espn":
+        new = espn_from_json(S, espn_fetch(rs["league_id"], rs.get("season") or S.season), rs["league_id"],
+                             rs.get("season") or S.season)
+    else:
+        raise ValueError("Use the ⚡ bookmark on the league's website to re-sync this one.")
+    new["my_team"] = new.get("my_team") or lg.get("my_team")
+    store.save(owner, row["id"], new)
+
+
+def render_league(S, store, owner, row, season):
+    lg = row["data"]
+    LS = league_season(S, lg, season)
+    tnames = {t["id"]: t["name"] for t in lg["teams"]}
+    synced = _parse_ts(lg.get("synced_at"))
+    synced_chip = f'<span class="fr-chip">Synced {synced.strftime("%b %d")}</span>' if synced else ""
+    H(f'<div class="fr-hero" style="background:linear-gradient(115deg,#2b1d4f 0%,{CARD} 100%);border-left:6px solid {GOLD}">'
+      f'<div><div class="nm">{esc(lg["name"])}</div><div>'
+      f'<span class="fr-chip">{PLATFORM_LABEL.get(lg["platform"], "")}</span>'
+      f'<span class="fr-chip">{lg["teams_in_league"]} teams</span>'
+      f'<span class="fr-chip">{pr.FORMAT_LABEL[lg.get("scoring", "half")].replace(" scoring", "")}</span>'
+      f'{synced_chip}</div></div></div>')
+    c1, c2, c3 = st.columns([2.2, 1, 1])
+    ids = [t["id"] for t in lg["teams"]]
+    cur = lg.get("my_team") if lg.get("my_team") in ids else None
+    pick = c1.selectbox("Which team is yours?", ids, index=ids.index(cur) if cur else None,
+                        format_func=lambda i: tnames[i], placeholder="Pick your team",
+                        key=f"my_{row['id']}")
+    if pick and pick != cur:
+        lg["my_team"] = pick
+        store.save(owner, row["id"], lg)
+        list_teams.clear()
+        st.rerun()
+    c2.markdown('<div style="height:1.75rem"></div>', unsafe_allow_html=True)
+    if c2.button("🔄 Re-sync", use_container_width=True, help="Pull the latest rosters"):
+        try:
+            with st.spinner("Syncing..."):
+                resync(S, store, owner, row)
+            list_teams.clear()
+            st.session_state._flash = "League re-synced."
+            st.rerun()
+        except Exception as e:
+            st.error(str(e))
+    c3.markdown('<div style="height:1.75rem"></div>', unsafe_allow_html=True)
+    if lg["platform"] == "yahoo":
+        with c3.popover("⚙️ Settings", use_container_width=True):
+            st.caption("Yahoo doesn't share scoring and lineup settings through the bookmark. Set them here.")
+            sc = st.selectbox("Scoring", list(FORMATS), index=list(FORMATS.values()).index(lg.get("scoring", "half")),
+                              key=f"ysc_{row['id']}")
+            sl = {**DEFAULT_SLOTS, **(lg.get("slots") or {})}
+            new = {}
+            for key in ["QB", "RB", "WR", "TE", "FLEX", "SUPERFLEX"]:
+                new[key] = st.number_input(SLOT_LABEL.get(key, key), 0, 4, int(sl.get(key, 0)),
+                                           key=f"ysl_{key}_{row['id']}")
+            if st.button("Save settings", key=f"ysave_{row['id']}"):
+                lg["scoring"], lg["slots"] = FORMATS[sc], new
+                store.save(owner, row["id"], lg)
+                list_teams.clear()
+                st.rerun()
+    if not pick:
+        st.info("Pick your team above to see your lineup, matchup, trade partners and waiver targets.")
+    with st.spinner("Analyzing the league..."):
+        R = league_report(LS, skey(LS, row["id"], lg.get("synced_at"), pick, str(lg.get("slots")),
+                                   lg.get("scoring")), lg)
+    week = R["week"]
+    tabs = st.tabs(["📋 My team", "🆚 Matchup", "🏆 Power rankings", "🔁 Trade partners", "🧲 Waiver wire",
+                    "👥 All rosters"])
+    with tabs[0]:
+        if pick and R.get("mine"):
+            me = next(t for t in lg["teams"] if t["id"] == pick)
+            if me.get("unmatched"):
+                st.caption(f"{me['unmatched']} player(s) on your roster (kickers, defenses or deep reserves) "
+                           f"aren't analyzed.")
+            render_team(LS, {"name": tnames[pick], "roster": me["players"], "scoring": lg.get("scoring", "half")},
+                        R["mine"], show_header=False)
+        else:
+            st.caption("Pick your team above.")
+    with tabs[1]:
+        render_matchup(lg, R, pick, tnames, week)
+    with tabs[2]:
+        render_power(lg, R, pick, tnames)
+    with tabs[3]:
+        if not pick:
+            st.caption("Pick your team above.")
+        else:
+            P = R.get("partners") or []
+            needs = R["teams"][pick]["needs"]
+            H(notes_html([("down", f"Your weakest spots: {', '.join(needs)}.")] if needs else
+                         [("up", "Every starting spot is at or above an average starter in this league.")]))
+            if P:
+                sec("Teams that fit a trade")
+                items = []
+                for t in P:
+                    items.append(
+                        f'<div class="fr-card" style="margin-bottom:.5rem"><div class="fr-cardh" style="color:{BLUE}">'
+                        f'With {esc(t["team"])} · {esc(t["fit"])}</div><div style="display:flex;flex-wrap:wrap;gap:.8rem;'
+                        f'align-items:center;justify-content:space-between">'
+                        f'<div><div class="fr-cardh" style="color:{RED}">You give</div>{logo(t["give"]["team"], 22)} '
+                        f'{plink(t["give"]["pid"], t["give"]["name"])}<div class="sm" style="color:{MUTED};'
+                        f'font-size:.76rem">{t["give"]["pos"]} · {esc(t["give_why"])} · {t["give_ros"]:.0f} ROS pts</div></div>'
+                        f'<div style="font-size:1.4rem;color:{MUTED}">⇄</div>'
+                        f'<div><div class="fr-cardh" style="color:{GREEN}">You get</div>{logo(t["get"]["team"], 22)} '
+                        f'{plink(t["get"]["pid"], t["get"]["name"])}<div class="sm" style="color:{MUTED};'
+                        f'font-size:.76rem">{t["get"]["pos"]} · their extra depth · {t["get_ros"]:.0f} ROS pts</div>'
+                        f'</div></div></div>')
+                H('<div class="fr-list">' + "".join(items) + "</div>")
+                st.caption("Matches teams that have extra depth where you're weak and are weak where you have extra "
+                           "depth, at similar rest-of-season value. That's the kind of trade both sides say yes to.")
+            else:
+                st.caption("No clean two-way fits right now. The upgrade targets under My team → Trade ideas show who "
+                           "owns each player.")
+    with tabs[4]:
+        if not pick:
+            st.caption("Pick your team above.")
+        else:
+            W = R.get("waivers") or {}
+            sec("Best available players (not on any roster in this league)")
+            cols = st.columns(2)
+            for i, pos in enumerate(pr.FANTASY_POS):
+                with cols[i % 2]:
+                    items = []
+                    for x in W.get(pos, []):
+                        p = x["p"]
+                        tr = x["trend"]
+                        trend = (f' · <span style="color:{GREEN if tr > 0 else RED}">usage {"▲" if tr > 0 else "▼"} '
+                                 f'{abs(tr):.1f}</span>') if tr is not None and abs(tr) >= 1.5 else ""
+                        items.append(player_row_html(p, f" · wk {week}: {p['proj']:.1f}{trend}",
+                                                     f'<span style="color:{GREEN}">{x["ros"]:.0f}</span>'))
+                    H(list_card(f"{pos}s", "Ranked by rest-of-season points", GREEN if pos in
+                                R["teams"][pick]["needs"] else BLUE, items))
+            st.caption("Green header = a position you need. Number on the right = projected rest-of-season points. "
+                       "'Usage ▲' = his role grew over the last 3 games, often the best waiver signal.")
+    with tabs[5]:
+        cols = st.columns(2)
+        for i, t in enumerate(sorted(lg["teams"], key=lambda t: -R["teams"][t["id"]]["ros_total"])):
+            T = R["teams"][t["id"]]
+            with cols[i % 2]:
+                items = [player_row_html(l["p"], f" · {SLOT_LABEL.get(l['slot'], l['slot'])}",
+                                         f'{l["p"]["proj"]:.1f}') for l in T["lineup"] if l["p"]]
+                items += [player_row_html(b, " · bench", f'<span style="color:{MUTED}">{b["proj"]:.1f}</span>')
+                          for b in T["bench"]]
+                H(list_card(f"{t['name']}{' (you)' if t['id'] == pick else ''}",
+                            f"{t.get('owner') or ''}", GOLD if t["id"] == pick else BORDER, items))
+    glossary(["ROS", "Projection", "xFP", "TD luck", "Floor / ceiling", "Defense rank"])
+
+
+def render_matchup(lg, R, pick, tnames, week):
+    if not pick:
+        st.caption("Pick your team above.")
+        return
+    opp = R.get("opponent")
+    ids = [t["id"] for t in lg["teams"] if t["id"] != pick]
+    if not opp or opp not in R["teams"]:
+        opp = st.selectbox("This week's opponent", ids, index=None, format_func=lambda i: tnames[i],
+                           placeholder="Pick your opponent", key=f"opp_{pick}")
+        if not opp:
+            st.caption("Pick your opponent to see the head-to-head projection.")
+            return
+    A, B = R["teams"][pick], R["teams"][opp]
+    a, b, p = win_prob(A["lineup"], B["lineup"])
+    col = GREEN if p >= 0.55 else RED if p <= 0.45 else AMBER
+    H(f'<div class="fr-card" style="border-left:5px solid {col}"><div class="fr-cardh" style="color:{col}">Week {week} '
+      f'matchup</div><div style="display:flex;flex-wrap:wrap;gap:1.5rem;align-items:center">'
+      f'<div><div class="fr-sub" style="margin:0">{esc(tnames[pick])}</div><div style="font-size:2rem;font-weight:800;'
+      f'color:{TEXT}">{a:.1f}</div></div><div style="color:{MUTED};font-weight:800">vs</div>'
+      f'<div><div class="fr-sub" style="margin:0">{esc(tnames[opp])}</div><div style="font-size:2rem;font-weight:800;'
+      f'color:{TEXT}">{b:.1f}</div></div><div style="margin-left:auto;text-align:right">'
+      f'<div style="font-size:2.2rem;font-weight:800;color:{col}">{p:.0%}</div><div class="fr-sub" style="margin:0">'
+      f'win probability</div></div></div></div>')
+    H('<div style="height:.6rem"></div>')
+    rows = []
+    for la, lb in zip(A["lineup"], B["lineup"]):
+        pa, pb = la["p"], lb["p"]
+        edge = (pa["proj"] if pa else 0) - (pb["proj"] if pb else 0)
+        ecol = GREEN if edge > 1 else RED if edge < -1 else MUTED
+        slot = SLOT_LABEL.get(la["slot"], la["slot"])
+        left = (f'{plink(pa["pid"], pa["name"])}<div class="sm" style="color:{MUTED};font-size:.74rem">'
+                f'{esc(pa["label"])}</div>') if pa else "–"
+        right = (f'{plink(pb["pid"], pb["name"])}<div class="sm" style="color:{MUTED};font-size:.74rem">'
+                 f'{esc(pb["label"])}</div>') if pb else "–"
+        pa_v = f'{pa["proj"]:.1f}' if pa else ""
+        pb_v = f'{pb["proj"]:.1f}' if pb else ""
+        rows.append(f'<tr style="border-top:1px solid {BORDER}">'
+                    f'<td style="padding:.45rem .6rem;text-align:right">{left}</td>'
+                    f'<td style="padding:.45rem .4rem;text-align:right;font-weight:800;color:{GOLD}">{pa_v}</td>'
+                    f'<td style="padding:.45rem .4rem;text-align:center"><span class="fr-pill" '
+                    f'style="background:{BORDER};color:{ecol}">{slot} {edge:+.1f}</span></td>'
+                    f'<td style="padding:.45rem .4rem;font-weight:800;color:{TEXT}">{pb_v}</td>'
+                    f'<td style="padding:.45rem .6rem">{right}</td></tr>')
+    H(f'<div class="fr-card fr-list" style="padding:0;overflow-x:auto"><table style="width:100%;border-collapse:collapse;'
+      f'font-size:.86rem"><tr><th style="text-align:right;padding:.5rem .6rem;color:{MUTED}">You</th><th></th>'
+      f'<th style="color:{MUTED}">Slot / edge</th><th></th><th style="text-align:left;padding:.5rem .6rem;'
+      f'color:{MUTED}">Them</th></tr>{"".join(rows)}</table></div>')
+    st.caption("Both lineups are the best possible by projection. Win probability accounts for how much each "
+               "starter's scoring swings week to week.")
+
+
+def render_power(lg, R, pick, tnames):
+    rows = []
+    order = sorted(lg["teams"], key=lambda t: -R["teams"][t["id"]]["ros_total"])
+    for i, t in enumerate(order, 1):
+        T = R["teams"][t["id"]]
+        rec = t.get("record")
+        r = {"Rank": i, "Team": t["name"] + (" (you)" if t["id"] == pick else ""),
+             "Record": f"{rec[0]}-{rec[1]}{'-' + str(rec[2]) if rec and rec[2] else ''}" if rec else "",
+             f"Wk {R['week']} proj": round(T["total"], 1), "ROS strength": round(T["ros_total"])}
+        for pos in pr.FANTASY_POS:
+            if pos in T["grades"]:
+                r[pos] = T["grades"][pos]["grade"][0]
+        rows.append(r)
+    df = pd.DataFrame(rows)
+    gcol = {"A": GREEN, "B": "#86efac", "C": AMBER, "D": "#fca5a5", "F": RED}
+    styled_df(df, row_bg=lambda r: "rgba(245,179,1,.12)" if str(r.get("Team", "")).endswith("(you)") else None,
+              cell={pos: (lambda v: gcol.get(v)) for pos in pr.FANTASY_POS})
+    st.caption("Ranked by ROS strength: each team's best lineup projected over the rest of the season through the "
+               "fantasy playoffs. Letter grades compare each team's starters with an average starter in this league.")
 
 
 # ------------------------------------------------------------------------------------
@@ -2300,21 +3100,30 @@ def page_teams(S, season):
     except Exception as e:
         st.error(f"Couldn't load your teams: {e}")
         return
+    if handle_pending_sync(S, store, owner, teams):
+        return
     mode = st.session_state.get("team_mode", "view")
+    if mode in ("new", "sync") and len(teams) >= MAX_TEAMS:
+        st.warning(f"You can save up to {MAX_TEAMS} leagues and teams. Delete one to add another.")
+        mode = "view"
+    if mode == "sync":
+        sync_page(S, store, owner, teams, season)
+        return
     if mode == "new":
-        if len(teams) >= MAX_TEAMS:
-            st.warning(f"You can save up to {MAX_TEAMS} teams.")
-        else:
-            team_editor(S, store, owner, None)
-            return
+        team_editor(S, store, owner, None)
+        return
     if not teams:
-        H(f'<div class="fr-title">My teams</div>')
+        H('<div class="fr-title">My leagues & teams</div>')
         H(f'<div class="fr-card" style="text-align:center;padding:2.2rem 1rem;margin-top:.8rem">'
           f'<div style="font-size:2.2rem">🏈</div><div style="font-weight:800;color:{TEXT};font-size:1.15rem;'
-          f'margin:.3rem 0">Add your first team</div><div class="fr-sub">Paste your Yahoo roster and get start/sit '
-          f'calls, position grades, trade ideas and bye-week warnings.</div></div>')
-        c = st.columns([1, 1, 1])
-        if c[1].button("➕ Create a team", type="primary", use_container_width=True):
+          f'margin:.3rem 0">Bring in your league</div><div class="fr-sub">Sync a whole Sleeper, ESPN or Yahoo league to '
+          f'get your matchup odds, start/sit calls, power rankings, trade partners and waiver targets. '
+          f'Or build a team by hand.</div></div>')
+        c = st.columns([1, 1.2, 1.2, 1])
+        if c[1].button("🔄 Sync a league", type="primary", use_container_width=True):
+            st.session_state.team_mode = "sync"
+            st.rerun()
+        if c[2].button("📝 Build a team", use_container_width=True):
             st.session_state.team_mode = "new"
             st.session_state.pop("edit_roster", None)
             st.rerun()
@@ -2323,20 +3132,34 @@ def page_teams(S, season):
     if st.session_state.get("team_sel") not in by_id:
         st.session_state.team_sel = teams[0]["id"]
     if mode == "edit":
-        team_editor(S, store, owner, by_id[st.session_state.team_sel])
-        return
-    top = st.columns([3, 1, 1, 1])
-    tid = top[0].selectbox("Team", list(by_id), key="team_sel", format_func=lambda t: by_id[t]["name"],
-                           label_visibility="collapsed")
-    if top[1].button("➕ New", use_container_width=True):
+        row = by_id[st.session_state.team_sel]
+        if row["data"].get("kind") == "league":
+            st.session_state.team_mode = "view"
+        else:
+            team_editor(S, store, owner, row)
+            return
+
+    def label(t):
+        d = by_id[t]["data"]
+        if d.get("kind") == "league":
+            return f"🏆 {d['name']} · {PLATFORM_LABEL.get(d.get('platform'), '')}"
+        return f"📝 {d['name']}"
+    top = st.columns([3, 1.1, 1.1, 1, 1])
+    tid = top[0].selectbox("Team", list(by_id), key="team_sel", format_func=label, label_visibility="collapsed")
+    is_league = by_id[tid]["data"].get("kind") == "league"
+    if top[1].button("🔄 Sync league", use_container_width=True):
+        st.session_state.team_mode = "sync"
+        st.rerun()
+    if top[2].button("📝 New team", use_container_width=True):
         st.session_state.team_mode = "new"
         st.session_state.pop("edit_roster", None)
         st.rerun()
-    if top[2].button("✏️ Edit", use_container_width=True):
+    if top[3].button("✏️ Edit", use_container_width=True, disabled=is_league,
+                     help="Leagues update with Re-sync" if is_league else None):
         st.session_state.team_mode = "edit"
         st.session_state.pop("edit_roster", None)
         st.rerun()
-    if top[3].button("🗑️ Delete", use_container_width=True):
+    if top[4].button("🗑️ Delete", use_container_width=True):
         st.session_state._confirm_delete = tid
     if st.session_state.get("_confirm_delete") == tid:
         st.warning(f"Delete **{by_id[tid]['name']}**? This can't be undone.")
@@ -2354,6 +3177,9 @@ def page_teams(S, season):
         if d2.button("Keep it"):
             st.session_state.pop("_confirm_delete", None)
             st.rerun()
+    if is_league:
+        render_league(S, store, owner, by_id[tid], season)
+        return
     team = by_id[tid]["data"]
     TS = get_season(season, team.get("scoring", S.fmt_name)) if team.get("scoring", S.fmt_name) != S.fmt_name else S
     with st.spinner("Analyzing your team..."):
@@ -2361,13 +3187,14 @@ def page_teams(S, season):
     render_team(TS, team, A)
 
 
-def render_team(S, team, A):
+def render_team(S, team, A, show_header=True):
     week = A["week"]
     lt, la = A.get("lineup_total"), A.get("league_avg_total")
     edge = div(lt - la, la) if (lt is not None and la) else None
     head_col = GREEN if (edge or 0) >= 0.05 else RED if (edge or 0) <= -0.05 else AMBER
     grades = A["grades"]
-    H(f'<div class="fr-hero" style="background:linear-gradient(115deg,#1e3a5f 0%,{CARD} 100%);border-left:6px solid {GOLD}">'
+    if show_header:
+        H(f'<div class="fr-hero" style="background:linear-gradient(115deg,#1e3a5f 0%,{CARD} 100%);border-left:6px solid {GOLD}">'
       f'<div><div class="nm">{esc(team["name"])}</div>'
       f'<div><span class="fr-chip">{pr.FORMAT_LABEL[team.get("scoring", "half")].replace(" scoring", "")}</span>'
       f'<span class="fr-chip">{A["n_teams"]}-team league</span><span class="fr-chip">{len(team["roster"])} players'
@@ -2515,6 +3342,11 @@ def render_team(S, team, A):
 def main():
     H(CSS)
     restore_session()
+    sync_code = st.query_params.get("sync")
+    if sync_code:
+        st.session_state._pending_sync = sync_code
+        st.session_state.view = "My Teams"
+        st.query_params.pop("sync", None)
     pend = st.session_state.pop("pending", None)
     if pend:
         if pend.get("player"):

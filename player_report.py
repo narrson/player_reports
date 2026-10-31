@@ -260,6 +260,7 @@ class Season:
         self.xfp_basis = None
         self.schedule = []
         self.injuries = {}
+        self.idmap = {"sleeper": {}, "espn": {}, "yahoo": {}}
         self._pool = {}
 
 
@@ -459,7 +460,25 @@ def load_season(S):
                 S.injuries[pid] = {"week": wk, "status": g(r, "report_status"),
                                    "injury": g(r, "report_primary_injury"), "practice": g(r, "practice_status")}
 
+    def _ids():
+        for r in nfl.load_ff_playerids().to_dicts():
+            gid = r.get("gsis_id")
+            if not gid:
+                continue
+            for plat in S.idmap:
+                v = r.get(f"{plat}_id")
+                if v is None or (isinstance(v, float) and math.isnan(v)) or v == "":
+                    continue
+                try:
+                    v = str(int(float(v)))
+                except (TypeError, ValueError):
+                    v = str(v).strip()
+                S.idmap[plat][v] = gid
+        if not any(S.idmap.values()):
+            raise ValueError("no rows")
+
     step("Players", _players, required=True)
+    step("Platform player IDs", _ids)
     pbp_df = step("Play-by-play", _pbp, required=True)
     step("Weekly fantasy stats", _weekly, required=True)
     step("Snap counts", _snaps)
