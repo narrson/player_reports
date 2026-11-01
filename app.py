@@ -218,6 +218,60 @@ div[data-testid="stDataFrame"] {{border: 1px solid {BORDER}; border-radius: 12px
 .fr-upd-dot {{width: 8px; height: 8px; border-radius: 50%; margin-top: .4rem; flex: none;}}
 .fr-upd-h {{font-size: .68rem; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; color: {MUTED};}}
 .fr-upd-t {{font-size: .84rem; color: {TEXT}; line-height: 1.35;}}
+
+/* ---------- gradients & colour system ---------- */
+.stApp {{background:
+    radial-gradient(1100px 620px at 8% -8%, rgba(124,58,237,.17), transparent 62%),
+    radial-gradient(900px 520px at 100% 0%, rgba(59,130,246,.15), transparent 60%),
+    radial-gradient(900px 700px at 50% 115%, rgba(245,179,1,.07), transparent 60%),
+    {BG} !important;}}
+[data-testid="stSidebar"] {{background: linear-gradient(180deg, #141f38 0%, #0e1628 55%, #0b1220 100%) !important;
+                           border-right: 1px solid {BORDER};}}
+.fr-card, .fr-stats, .fr-tc, .fr-game, .fr-move, .fr-note, .fr-gl, .fr-strip, .fr-wk {{
+    background: linear-gradient(160deg, #17223d 0%, #121a2b 55%, #0f1727 100%) !important;}}
+.fr-kpi {{background: linear-gradient(135deg, var(--accbg, rgba(255,255,255,.03)) 0%, #131c30 58%, #101828 100%) !important;}}
+.fr-kpi:before {{width: 4px; background: linear-gradient(180deg, var(--acc), transparent);}}
+.fr-sec {{display: flex; align-items: center; gap: .55rem;}}
+.fr-sec:before {{content: ""; width: 22px; height: 3px; border-radius: 3px;
+                background: linear-gradient(90deg, {GOLD}, #f97316, #ef4444);}}
+.fr-pl {{border-radius: 9px;}}
+.fr-pl:hover {{filter: brightness(1.12);}}
+.stTabs [data-baseweb="tab-list"] {{border-bottom: 1px solid {BORDER};}}
+.stTabs [data-baseweb="tab"][aria-selected="true"] {{background: linear-gradient(180deg, rgba(245,179,1,.16), rgba(245,179,1,0));
+                                                    border-radius: 9px 9px 0 0;}}
+.stTabs [data-baseweb="tab-highlight"] {{background: linear-gradient(90deg, {GOLD}, #f97316) !important; height: 3px;}}
+div[data-testid="stButton"] > button, div[data-testid="stDownloadButton"] > button,
+div[data-testid="stPopover"] button, div[data-testid="stFormSubmitButton"] > button {{
+    background: linear-gradient(180deg, #1c2945 0%, #141d33 100%); border: 1px solid #2b3c60; border-radius: 11px;
+    color: {TEXT}; transition: border-color .15s, box-shadow .15s;}}
+div[data-testid="stButton"] > button:hover, div[data-testid="stDownloadButton"] > button:hover,
+div[data-testid="stPopover"] button:hover, div[data-testid="stFormSubmitButton"] > button:hover {{
+    border-color: {GOLD}; box-shadow: 0 0 0 1px rgba(245,179,1,.35), 0 6px 18px rgba(245,179,1,.12); color: #fff;}}
+button[kind="primary"], button[data-testid="stBaseButton-primary"], button[kind="primaryFormSubmit"],
+button[data-testid="stBaseButton-primaryFormSubmit"] {{
+    background: linear-gradient(135deg, #f5b301 0%, #f97316 100%) !important; color: #111 !important; border: none !important;
+    font-weight: 800 !important; box-shadow: 0 6px 20px rgba(245,158,11,.25) !important;}}
+button[data-testid="stBaseButton-segmented_control"], button[kind="segmented_control"] {{
+    background: linear-gradient(180deg, #19243f, #131c31) !important; border-color: #2b3c60 !important;}}
+button[data-testid="stBaseButton-segmented_controlActive"], button[kind="segmented_controlActive"] {{
+    background: linear-gradient(135deg, rgba(245,179,1,.30), rgba(249,115,22,.20)) !important;
+    border-color: {GOLD} !important; color: #fff !important; box-shadow: 0 0 14px rgba(245,179,1,.18);}}
+[data-baseweb="select"] > div {{background: linear-gradient(180deg, #18233d, #121a2c) !important; border-color: #2b3c60 !important;
+                               border-radius: 11px !important;}}
+[data-baseweb="select"] input[type="search"]::-webkit-search-cancel-button {{display: none;}}
+[data-testid="stExpander"] details {{background: linear-gradient(160deg, #16213b, #101827); border-color: {BORDER};
+                                    border-radius: 12px;}}
+/* slim league / team bar */
+.fr-lbar {{display: flex; flex-wrap: wrap; align-items: center; gap: .45rem .55rem; padding: .62rem 1rem; margin: .1rem 0 .7rem;
+          border-radius: 14px; border: 1px solid {BORDER}; border-left: 4px solid var(--pc);
+          background: linear-gradient(110deg, color-mix(in srgb, var(--pc) 26%, transparent) 0%, #17223d 38%, #111a2b 100%);}}
+.fr-lbar-name {{font-size: 1.22rem; font-weight: 900; color: #fff; margin-right: .35rem; letter-spacing: -.01em;}}
+.fr-lchip {{font-size: .7rem; font-weight: 800; padding: .14rem .5rem; border-radius: 999px; color: #e2e8f0;
+           background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12);}}
+.fr-lchip.plat {{background: color-mix(in srgb, var(--pc) 30%, transparent); border-color: var(--pc);}}
+.fr-lchip.sc {{background: linear-gradient(90deg, rgba(245,179,1,.18), rgba(249,115,22,.10)); border-color: rgba(245,179,1,.45);
+              color: #fde68a;}}
+.fr-lbar-sync {{margin-left: auto; font-size: .7rem; color: {MUTED};}}
 .fr-foot {{color: {DIM}; font-size: .76rem; margin-top: 2.2rem; text-align: center; line-height: 1.6;}}
 </style>
 """
@@ -573,7 +627,9 @@ def hero(rep):
 
 
 def kpi(label, value, sub="&nbsp;", acc=BORDER, vcolor=TEXT):
-    return (f'<div class="fr-kpi" style="--acc:{acc}"><div class="l">{esc(label)}</div>'
+    accbg = f"{acc}2b" if (isinstance(acc, str) and acc.startswith("#") and len(acc) == 7 and acc != BORDER) else \
+        "rgba(255,255,255,.03)"
+    return (f'<div class="fr-kpi" style="--acc:{acc};--accbg:{accbg}"><div class="l">{esc(label)}</div>'
             f'<div class="v" style="color:{vcolor}">{esc(str(value))}</div><div class="s">{sub or "&nbsp;"}</div></div>')
 
 
@@ -1809,6 +1865,60 @@ def _auth_component():
     with open(os.path.join(d, "index.html"), "w", encoding="utf-8") as f:
         f.write(AUTH_HTML)
     return components.declare_component("fr_auth_store", path=d)
+
+
+UI_HTML = """<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0"><script>
+(function(){
+  function post(m){ m.isStreamlitMessage = true; window.parent.postMessage(m, "*"); }
+  // Dropdown search boxes are plain text inputs, so browsers and password managers mistake them for a username
+  // field and pop up saved logins. Mark every one as "not a login field" and keep doing it as new ones appear.
+  function fix(doc){
+    var ins = doc.querySelectorAll('[data-baseweb="select"] input, [role="combobox"]');
+    for (var i = 0; i < ins.length; i++) {
+      var el = ins[i];
+      if (el.tagName !== "INPUT" || el.dataset.frFix === "1") continue;
+      el.setAttribute("autocomplete", "off");
+      el.setAttribute("autocorrect", "off");
+      el.setAttribute("spellcheck", "false");
+      el.setAttribute("data-lpignore", "true");
+      el.setAttribute("data-1p-ignore", "true");
+      el.setAttribute("data-bwignore", "true");
+      el.setAttribute("data-form-type", "other");
+      el.setAttribute("name", "fr-pick-" + Math.random().toString(36).slice(2, 9));
+      try { el.type = "search"; } catch (e) {}
+      el.dataset.frFix = "1";
+    }
+  }
+  try {
+    var d = window.parent.document;
+    fix(d);
+    var queued = false;
+    new MutationObserver(function(){
+      if (queued) return; queued = true;
+      setTimeout(function(){ queued = false; fix(d); }, 60);
+    }).observe(d.body, { childList: true, subtree: true });
+  } catch (e) {}
+  post({ type: "streamlit:componentReady", apiVersion: 1 });
+  post({ type: "streamlit:setFrameHeight", height: 0 });
+})();
+</script></body></html>"""
+
+
+@st.cache_resource(show_spinner=False)
+def _ui_component():
+    import streamlit.components.v1 as components
+    d = os.path.join(tempfile.gettempdir(), "fr_ui_helper_v1")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "index.html"), "w", encoding="utf-8") as f:
+        f.write(UI_HTML)
+    return components.declare_component("fr_ui_helper", path=d)
+
+
+def ui_helper():
+    try:
+        _ui_component()(key="fr_ui_helper", default=None)
+    except Exception:
+        pass
 
 
 def device_store():
@@ -3141,7 +3251,10 @@ def player_line(S, e, p, week, badge=""):
             extra = f' · <span style="color:{RED}">BYE</span>'
     st_ = e.get("status") or ((p or {}).get("inj_status") or "").split(" (")[0]
     dim = " ir" if slot == "IR" else " bye" if (p and p.get("bye")) else ""
-    return (f'<div class="fr-pl{dim}">{slot_pill(slot, e.get("pos"))}{logo(e.get("team"), 26)}'
+    pc = POS_COLORS.get(e.get("pos"), "#64748b")
+    tint = (f' style="background:linear-gradient(90deg,{pc}{"1f" if slot in STARTING else "0e"} 0%,transparent 45%)"'
+            if slot != "IR" else "")
+    return (f'<div class="fr-pl{dim}"{tint}>{slot_pill(slot, e.get("pos"))}{logo(e.get("team"), 26)}'
             f'<div class="fr-pl-main"><div class="fr-pl-name">{name}{inj_badge(st_)}{badge}</div>'
             f'<div class="fr-pl-meta">{meta}{extra}</div></div>{pts_cell(S, e, p, week)}</div>')
 
@@ -3724,27 +3837,26 @@ def render_league(S, store, owner, row, season):
     eff_sc = effective_scoring(lg)
     sc_src = "set by you" if lg.get("scoring_manual") else (f"from {lg['scoring_source']}" if lg.get("scoring_source")
                                                              else "default, edit in League settings")
-    chips = [PLATFORM_LABEL.get(lg["platform"], ""), f'{lg["teams_in_league"]} teams']
-    if synced:
-        chips.append(f'Synced {synced.strftime("%b %d, %I:%M %p")}')
-    chip_html = "".join(f'<span class="fr-chip">{esc(c)}</span>' for c in chips)
+    plat_col = {"sleeper": "#a78bfa", "espn": "#ef4444", "yahoo": "#8b5cf6"}.get(lg["platform"], GOLD)
     sc_line = scoring_summary(eff_sc) if eff_sc else pr.FORMAT_LABEL[lg.get("scoring", "half")]
-    H(f'<div class="fr-hero" style="background:linear-gradient(115deg,#2b1d4f 0%,{CARD} 100%);border-left:6px solid {GOLD}">'
-      f'<div><div class="nm">{esc(lg["name"])}</div><div>{chip_html}</div>'
-      f'<div class="meta">Scoring: <b style="color:#fff">{esc(sc_line)}</b> <span style="opacity:.75">({esc(sc_src)})'
-      f'</span></div></div></div>')
+    synced_txt = synced.strftime("%b %d, %I:%M %p") if synced else ""
+    H(f'<div class="fr-lbar" style="--pc:{plat_col}">'
+      f'<div class="fr-lbar-name">{esc(lg["name"])}</div>'
+      f'<span class="fr-lchip plat">{esc(PLATFORM_LABEL.get(lg["platform"], ""))}</span>'
+      f'<span class="fr-lchip">{lg["teams_in_league"]} teams</span>'
+      f'<span class="fr-lchip sc" title="Scoring {esc(sc_src)}">{esc(sc_line)}</span>'
+      + (f'<span class="fr-lbar-sync">Synced {esc(synced_txt)}</span>' if synced_txt else "") + '</div>')
     c1, c2, c3 = st.columns([2.2, 1, 1])
     ids = [t["id"] for t in lg["teams"]]
     cur = lg.get("my_team") if lg.get("my_team") in ids else None
-    pick = c1.selectbox("Which team is yours?", ids, index=ids.index(cur) if cur else None,
-                        format_func=lambda i: tnames[i], placeholder="Pick your team",
-                        key=f"my_{row['id']}")
+    pick = c1.selectbox("Your team", ids, index=ids.index(cur) if cur else None,
+                        format_func=lambda i: f"👤 {tnames[i]}  (your team)" if i == cur else tnames[i],
+                        placeholder="Which team is yours?", key=f"my_{row['id']}", label_visibility="collapsed")
     if pick and pick != cur:
         lg["my_team"] = pick
         store.save(owner, row["id"], lg)
         list_teams.clear()
         st.rerun()
-    c2.markdown('<div style="height:1.75rem"></div>', unsafe_allow_html=True)
     can_api = (lg.get("resync") or {}).get("type") in ("sleeper", "espn")
     if can_api:
         if c2.button("🔄 Re-sync", use_container_width=True, help="Pull the latest rosters, lineups and scoring"):
@@ -3760,7 +3872,6 @@ def render_league(S, store, owner, row, season):
         if c2.button("⚡ Update from Yahoo" if lg["platform"] == "yahoo" else "⚡ Update", use_container_width=True,
                      help="Shows the bookmark that re-syncs this league"):
             st.session_state[f"_bm_open_{row['id']}"] = not st.session_state.get(f"_bm_open_{row['id']}", False)
-    c3.markdown('<div style="height:1.75rem"></div>', unsafe_allow_html=True)
     with c3.popover("⚙️ League settings", use_container_width=True):
         league_settings_editor(store, owner, row, lg)
     outdated = lg["platform"] == "yahoo" and lg.get("bookmark_version", 1) < LINEUP_BOOKMARK_VERSION
@@ -4321,6 +4432,70 @@ def list_teams(owner, store):
 list_teams.clear = lambda: st.session_state.__setitem__("_teams_nonce", st.session_state.get("_teams_nonce", 0) + 1)
 
 
+def sort_teams(teams):
+    """Your chosen order first (set in ⋯ Manage), then most recently updated."""
+    return sorted(teams, key=lambda t: (t["data"].get("order", 999), -(_parse_ts(t.get("updated_at")) or
+                                                                       datetime(2000, 1, 1, tzinfo=timezone.utc)).timestamp()))
+
+
+def default_team_id(teams):
+    return next((t["id"] for t in teams if t["data"].get("is_default")), teams[0]["id"])
+
+
+def manage_teams(store, owner, teams, by_id, tid, is_league):
+    cur = by_id[tid]
+    st.markdown(f"**{esc(cur['name'])}**")
+    c1, c2 = st.columns(2)
+    if cur["data"].get("is_default"):
+        if c1.button("☆ Remove default", key="mg_undef", use_container_width=True):
+            cur["data"]["is_default"] = False
+            store.save(owner, tid, cur["data"])
+            list_teams.clear()
+            st.rerun()
+    elif c1.button("⭐ Open this by default", key="mg_def", use_container_width=True):
+        for t in teams:
+            if t["data"].get("is_default") and t["id"] != tid:
+                t["data"]["is_default"] = False
+                store.save(owner, t["id"], t["data"])
+        cur["data"]["is_default"] = True
+        store.save(owner, tid, cur["data"])
+        list_teams.clear()
+        st.rerun()
+    if not is_league:
+        if c2.button("✏️ Edit team", key="mg_edit", use_container_width=True):
+            st.session_state.team_mode = "edit"
+            st.session_state.pop("edit_roster", None)
+            st.rerun()
+    if st.button("🗑️ Delete", key="mg_del", use_container_width=True):
+        st.session_state._confirm_delete = tid
+        st.rerun()
+    if len(teams) > 1:
+        st.markdown("**Order in the dropdown**")
+        ids = [t["id"] for t in teams]
+        for i, t in enumerate(teams):
+            r = st.columns([5, 1, 1])
+            star = "⭐ " if t["data"].get("is_default") else ""
+            r[0].markdown(f'<div style="padding-top:.45rem;font-size:.86rem">{i + 1}. {star}{esc(t["name"])}</div>',
+                          unsafe_allow_html=True)
+            if r[1].button("↑", key=f"up_{t['id']}", disabled=i == 0):
+                ids[i - 1], ids[i] = ids[i], ids[i - 1]
+                save_order(store, owner, by_id, ids)
+            if r[2].button("↓", key=f"dn_{t['id']}", disabled=i == len(ids) - 1):
+                ids[i + 1], ids[i] = ids[i], ids[i + 1]
+                save_order(store, owner, by_id, ids)
+        st.caption("⭐ The default opens first every time you come to My Teams.")
+
+
+def save_order(store, owner, by_id, ids):
+    for n, i in enumerate(ids):
+        d = by_id[i]["data"]
+        if d.get("order") != n:
+            d["order"] = n
+            store.save(owner, i, d)
+    list_teams.clear()
+    st.rerun()
+
+
 def page_teams(S, season):
     owner, store = teams_login_gate()
     if not owner:
@@ -4386,9 +4561,10 @@ def page_teams(S, season):
             st.session_state.pop("edit_roster", None)
             st.rerun()
         return
+    teams = sort_teams(teams)
     by_id = {t["id"]: t for t in teams}
     if st.session_state.get("team_sel") not in by_id:
-        st.session_state.team_sel = teams[0]["id"]
+        st.session_state.team_sel = default_team_id(teams)
     if mode == "edit":
         row = by_id[st.session_state.team_sel]
         if row["data"].get("kind") == "league":
@@ -4399,10 +4575,11 @@ def page_teams(S, season):
 
     def label(t):
         d = by_id[t]["data"]
+        star = "⭐ " if d.get("is_default") else ""
         if d.get("kind") == "league":
-            return f"🏆 {d['name']} · {PLATFORM_LABEL.get(d.get('platform'), '')}"
-        return f"📝 {d['name']}"
-    top = st.columns([3, 1.1, 1.1, 1, 1])
+            return f"{star}🏆 {d['name']} · {PLATFORM_LABEL.get(d.get('platform'), '')}"
+        return f"{star}📝 {d['name']}"
+    top = st.columns([3.2, 1.15, 1.1, 1.05])
     tid = top[0].selectbox("Team", list(by_id), key="team_sel", format_func=label, label_visibility="collapsed")
     is_league = by_id[tid]["data"].get("kind") == "league"
     if top[1].button("🔄 Sync league", use_container_width=True):
@@ -4412,13 +4589,8 @@ def page_teams(S, season):
         st.session_state.team_mode = "new"
         st.session_state.pop("edit_roster", None)
         st.rerun()
-    if top[3].button("✏️ Edit", use_container_width=True, disabled=is_league,
-                     help="Leagues update with Re-sync" if is_league else None):
-        st.session_state.team_mode = "edit"
-        st.session_state.pop("edit_roster", None)
-        st.rerun()
-    if top[4].button("🗑️ Delete", use_container_width=True):
-        st.session_state._confirm_delete = tid
+    with top[3].popover("⋯ Manage", use_container_width=True):
+        manage_teams(store, owner, teams, by_id, tid, is_league)
     if st.session_state.get("_confirm_delete") == tid:
         st.warning(f"Delete **{by_id[tid]['name']}**? This can't be undone.")
         d1, d2, _ = st.columns([1, 1, 3])
@@ -4452,13 +4624,13 @@ def render_team(S, team, A, show_header=True, lineup_fn=None):
     head_col = GREEN if (edge or 0) >= 0.05 else RED if (edge or 0) <= -0.05 else AMBER
     grades = A["grades"]
     if show_header:
-        H(f'<div class="fr-hero" style="background:linear-gradient(115deg,#1e3a5f 0%,{CARD} 100%);border-left:6px solid {GOLD}">'
-      f'<div><div class="nm">{esc(team["name"])}</div>'
-      f'<div><span class="fr-chip">{pr.FORMAT_LABEL[team.get("scoring", "half")].replace(" scoring", "")}</span>'
-      f'<span class="fr-chip">{A["n_teams"]}-team league</span><span class="fr-chip">{len(team["roster"])} players'
-      f'</span></div></div>'
-      f'<div class="fr-badge"><div class="big" style="color:{head_col}">{fmt(lt, "dec1")}</div>'
-      f'<div class="lab">Week {week} projection</div></div></div>')
+        H(f'<div class="fr-lbar" style="--pc:{GOLD}"><div class="fr-lbar-name">{esc(team["name"])}</div>'
+          f'<span class="fr-lchip plat">Manual team</span>'
+          f'<span class="fr-lchip">{A["n_teams"]}-team league</span>'
+          f'<span class="fr-lchip sc">{pr.FORMAT_LABEL[team.get("scoring", "half")].replace(" scoring", "")}</span>'
+          f'<span class="fr-lchip">{len(team["roster"])} players</span>'
+          f'<span class="fr-lbar-sync" style="font-size:.85rem;color:#fff"><b style="color:{head_col}">'
+          f'{fmt(lt, "dec1")}</b> wk {week} proj</span></div>')
     if A["missing"]:
         st.caption(f"{len(A['missing'])} rostered player(s) have no data this season and are skipped.")
     if not week:
@@ -4597,6 +4769,7 @@ def render_team(S, team, A, show_header=True, lineup_fn=None):
 
 def main():
     H(CSS)
+    ui_helper()
     restore_session()
     sync_code = st.query_params.get("sync")
     if sync_code == "paste":
