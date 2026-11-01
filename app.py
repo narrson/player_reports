@@ -207,6 +207,17 @@ div[data-testid="stDataFrame"] {{border: 1px solid {BORDER}; border-radius: 12px
 .fr-move-arrow {{color: {MUTED}; font-size: 1.1rem;}}
 .fr-move-gain {{font-weight: 900; color: #4ade80; font-size: 1.05rem; min-width: 52px; text-align: right;}}
 .fr-dim {{color: {MUTED}; font-size: .76rem;}}
+.fr-news {{padding: .65rem 0; border-bottom: 1px solid {BORDER};}}
+.fr-news:last-child {{border-bottom: none;}}
+.fr-news-t a {{color: {TEXT} !important; font-weight: 700; text-decoration: none !important; font-size: .92rem;}}
+.fr-news-t a:hover {{color: {GOLD} !important;}}
+.fr-news-b {{color: #c3cddb; font-size: .82rem; margin-top: .2rem; line-height: 1.4;}}
+.fr-news-m {{color: {MUTED}; font-size: .72rem; margin-top: .25rem;}}
+.fr-upd {{display: flex; gap: .6rem; padding: .45rem 0; border-bottom: 1px solid {BORDER}55;}}
+.fr-upd:last-child {{border-bottom: none;}}
+.fr-upd-dot {{width: 8px; height: 8px; border-radius: 50%; margin-top: .4rem; flex: none;}}
+.fr-upd-h {{font-size: .68rem; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; color: {MUTED};}}
+.fr-upd-t {{font-size: .84rem; color: {TEXT}; line-height: 1.35;}}
 .fr-foot {{color: {DIM}; font-size: .76rem; margin-top: 2.2rem; text-align: center; line-height: 1.6;}}
 </style>
 """
@@ -941,6 +952,186 @@ def pdf_button(rep):
                            file_name=f"{pr.slug(rep['name'])}_{rep['season']}_report.pdf", mime="application/pdf")
 
 
+# ------------------------------------------------------------------------------------
+# News & updates (bottom of the player page)
+# ------------------------------------------------------------------------------------
+
+ESPN_NEWS = "https://site.api.espn.com/apis/fantasy/v2/games/ffl/news/players"
+GOOGLE_NEWS = "https://news.google.com/rss/search"
+
+
+def espn_id_for(S, pid):
+    rev = S.__dict__.setdefault("_espn_rev", {})
+    if not rev:
+        for eid, gid in ensure_idmap(S).get("espn", {}).items():
+            rev[gid] = eid
+    return rev.get(pid)
+
+
+def _clean_text(t, n=230):
+    t = re.sub(r"<[^>]+>", " ", html.unescape(str(t or "")))
+    t = re.sub(r"\s+", " ", t).strip()
+    return t if len(t) <= n else t[: n - 1].rsplit(" ", 1)[0] + "…"
+
+
+def parse_espn_news(data):
+    items = []
+    feed = (data or {}).get("feed") or (data or {}).get("articles") or (data or {}).get("news") or []
+    for it in feed:
+        head = it.get("headline") or it.get("title")
+        if not head:
+            continue
+        link = (((it.get("links") or {}).get("web") or {}).get("href")) or it.get("link")
+        items.append({"title": _clean_text(head, 160), "blurb": _clean_text(it.get("story") or it.get("description")),
+                      "when": it.get("published") or it.get("lastModified"), "source": "ESPN", "url": link})
+    return items
+
+
+def parse_google_rss(xml_text, name):
+    import xml.etree.ElementTree as ET
+    items = []
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return items
+    last = name.split()[-1].lower() if name else ""
+    for it in root.iter("item"):
+        title = it.findtext("title") or ""
+        src = it.findtext("source") or ""
+        if src and title.endswith(" - " + src):
+            title = title[: -len(src) - 3]
+        if last and last not in title.lower():
+            continue  # keep it about him
+        items.append({"title": _clean_text(title, 160), "blurb": "", "when": it.findtext("pubDate"),
+                      "source": src or "News", "url": it.findtext("link")})
+    return items
+
+
+def _when(ts):
+    if not ts:
+        return None
+    from email.utils import parsedate_to_datetime
+    try:
+        d = parsedate_to_datetime(ts) if "," in str(ts) else datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def ago(d):
+    if not d:
+        return ""
+    s_ = (datetime.now(timezone.utc) - d).total_seconds()
+    if s_ < 3600:
+        return f"{max(1, int(s_ // 60))}m ago"
+    if s_ < 86400:
+        return f"{int(s_ // 3600)}h ago"
+    days = int(s_ // 86400)
+    return f"{days}d ago" if days < 14 else d.strftime("%b %d")
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_news(name, team, espn_id):
+    """Headlines for a player: ESPN's fantasy news feed first, Google News as a backup. Cached 30 minutes."""
+    import requests
+    items = []
+    if espn_id:
+        try:
+            r = requests.get(ESPN_NEWS, params={"limit": 8, "playerId": espn_id}, timeout=8,
+                             headers={"User-Agent": "Mozilla/5.0 (FantasyReports)"})
+            if r.ok:
+                items = parse_espn_news(r.json())
+        except Exception:
+            pass
+    if len(items) < 3:
+        try:
+            q = f'"{name}" {team or ""} NFL'.strip()
+            r = requests.get(GOOGLE_NEWS, params={"q": q, "hl": "en-US", "gl": "US", "ceid": "US:en"}, timeout=8,
+                             headers={"User-Agent": "Mozilla/5.0 (FantasyReports)"})
+            if r.ok:
+                seen = {i["title"].lower() for i in items}
+                items += [i for i in parse_google_rss(r.text, name) if i["title"].lower() not in seen]
+        except Exception:
+            pass
+    for i in items:
+        d = _when(i["when"])
+        i["ts"] = d.isoformat() if d else ""
+    items.sort(key=lambda i: i["ts"], reverse=True)
+    return items[:8]
+
+
+def player_updates(S, rep):
+    """Site-generated updates: injury report history, recent games, depth chart and role changes."""
+    pid, pos = rep["pid"], rep["pos"]
+    out = []
+    hist = getattr(S, "inj_hist", {}).get(pid, [])
+    for h in hist[-4:][::-1]:
+        bits = [b for b in [h.get("status"), h.get("injury"), h.get("practice")] if b]
+        if bits:
+            out.append(("down" if h.get("status") else "info", f"Week {h['week']} injury report", " · ".join(bits)))
+    p = pr.project_player(S, pid)
+    if p:
+        for tone, text in p["reasons"]:
+            if text.startswith(("Depth chart", "Missed his team")):
+                out.append((tone, "This week", text))
+    played = [w for w in rep["weekly"] if not w.get("status")]
+    for w in played[-3:][::-1]:
+        bits = [f"{w.get('pts', 0):.1f} pts" + (f" ({pos}{w['rank']})" if w.get("rank") else "")]
+        if w.get("snap_pct") is not None:
+            bits.append(f"{w['snap_pct']:.0f}% snaps")
+        if pos in ("WR", "TE", "RB") and w.get("targets"):
+            bits.append(f"{int(w['targets'])} targets")
+        if pos in ("RB", "QB") and w.get("carries"):
+            bits.append(f"{int(w['carries'])} carries")
+        if pos == "QB" and w.get("pass_yds"):
+            bits.append(f"{int(w['pass_yds'])} pass yds")
+        col = "up" if (w.get("rank") or 99) <= (12 if pos in ("QB", "TE") else 24) else "info"
+        out.append((col, f"Week {w['week']} {w.get('opp', '')}", " · ".join(bits)))
+    missed = [w for w in rep["weekly"] if w.get("status") == "Did not play"][-2:]
+    for w in missed:
+        out.append(("down", f"Week {w['week']}", "Did not play"))
+    for t in rep.get("trends", []):
+        if abs(t["delta"]) >= t["thr"] and not t["label"].startswith("Fantasy points"):
+            out.append(("up" if t["delta"] > 0 else "down", "Role trend",
+                        f"{t['label']} {'up' if t['delta'] > 0 else 'down'}: {fmt(t['last3'], t['kind'])} over the "
+                        f"last 3 games vs {fmt(t['season'], t['kind'])} on the season"))
+    return out
+
+
+def render_news(S, rep):
+    sec("News & updates")
+    left, right = st.columns([3, 2])
+    with left:
+        with st.spinner("Loading headlines..."):
+            try:
+                items = fetch_news(rep["name"], rep["team"], espn_id_for(S, rep["pid"]))
+            except Exception:
+                items = []
+        if items:
+            rows = []
+            for i in items:
+                when = ago(_when(i["ts"])) if i.get("ts") else ""
+                title = (f'<a href="{esc(i["url"])}" target="_blank" rel="noopener">{esc(i["title"])}</a>'
+                         if i.get("url") else esc(i["title"]))
+                blurb = f'<div class="fr-news-b">{esc(i["blurb"])}</div>' if i.get("blurb") else ""
+                rows.append(f'<div class="fr-news"><div class="fr-news-t">{title}</div>{blurb}'
+                            f'<div class="fr-news-m">{esc(i["source"])}{" · " + when if when else ""}</div></div>')
+            H(f'<div class="fr-card" style="padding:.3rem 1rem">{"".join(rows)}</div>')
+            st.caption("Headlines open the full story at the source. Refreshed every 30 minutes.")
+        else:
+            H(f'<div class="fr-card"><div class="fr-sub">No recent headlines found for {esc(rep["name"])}.</div></div>')
+    with right:
+        ups = player_updates(S, rep)
+        if ups:
+            rows = []
+            for tone, head, text in ups:
+                c = {"up": GREEN, "down": RED}.get(tone, BLUE)
+                rows.append(f'<div class="fr-upd"><span class="fr-upd-dot" style="background:{c}"></span><div>'
+                            f'<div class="fr-upd-h">{esc(head)}</div><div class="fr-upd-t">{esc(text)}</div></div></div>')
+            H(f'<div class="fr-card" style="padding:.5rem .9rem">{"".join(rows)}</div>')
+            st.caption("Status and usage updates from the official injury report and game data.")
+
+
 def player_search(S, key, placeholder="Search any QB, RB, WR or TE..."):
     pids, labels = get_player_list(S, skey(S))
     if st.session_state.get(key) not in labels:
@@ -975,6 +1166,7 @@ def page_player(S):
     for t, fn in zip(tabs[1:], (tab_weekly, tab_matchups, tab_ranks, tab_splits, tab_plays)):
         with t:
             fn(rep)
+    render_news(S, rep)
     glossary(["xFP", "+/- exp", "TD luck", "Finish", "Snap %", "Route %", "Boom / bust", "Floor / ceiling",
               "Implied total", "Spread", "Defense rank", "PROE", "RZ", "EZ tgt", "HVT", "EPA"]
              + POS_TERMS[rep["pos"]])
@@ -1771,9 +1963,14 @@ def analyze_team(S, team, owner_of=None, my_team_id=None):
     slots = {**DEFAULT_SLOTS, **(team.get("slots") or {})}
     n_teams = int(team.get("teams_in_league") or 12)
     week = pr.next_week(S)
-    roster = [pid for pid in dict.fromkeys(team.get("roster", [])) if pr.player_base(S, pid)]
-    missing = [pid for pid in team.get("roster", []) if pid not in roster]
-    projs = {pid: pr.project_player(S, pid, week) for pid in roster}
+    all_keys = list(dict.fromkeys(team.get("roster", [])))
+    projs = {}
+    for k in all_keys:
+        p = project_any(S, k, week) if week else None
+        if p:
+            projs[k] = p
+    roster = [k for k in projs if projs[k]["pos"] in pr.FANTASY_POS and pr.player_base(S, k)]
+    missing = [k for k in all_keys if k not in projs]
     lineup, bench = optimal_lineup(projs, slots)
     starters = [l["p"] for l in lineup if l["p"]]
     out = {"week": week, "slots": slots, "n_teams": n_teams, "projs": projs, "lineup": lineup, "bench": bench,
@@ -1824,6 +2021,11 @@ def analyze_team(S, team, owner_of=None, my_team_id=None):
                            if not p["bye"]], reverse=True)
             fixed = sum(n_teams * slots.get(pos, 0) for pos in SLOT_ELIG[slot])
             total_avg += (mean(pool[fixed: fixed + n_teams * n]) or 0) * n
+    for slot in ("K", "DEF"):
+        n = slots.get(slot, 0)
+        if n:
+            top = kdef_pool(S, slot, week)[: n_teams * n]
+            total_avg += (mean([p["proj"] for p in top]) or 0) * n
     out["lineup_total"], out["league_avg_total"] = sum(p["proj"] for p in starters), total_avg
 
     # Rest-of-season values for trade logic
@@ -1887,8 +2089,10 @@ def analyze_team(S, team, owner_of=None, my_team_id=None):
     out["trades"] = out["trades"][:6]
 
     # Bye-week and lineup holes for the rest of the season
+    kd = [k for k in projs if projs[k]["pos"] in ("K", "DEF")]
     for w in range(week, pr.FANTASY_PLAYOFF_WEEKS[-1] + 1):
         pw = {pid: pr.project_player(S, pid, w, injuries=(w == week)) for pid in roster}
+        pw.update({k: project_any(S, k, w) for k in kd})
         lu, _ = optimal_lineup(pw, slots)
         holes = [SLOT_LABEL.get(l["slot"], l["slot"]) for l in lu if not l["p"] or l["p"]["proj"] <= 0]
         byes = [p["name"] for p in pw.values() if p and p["bye"]]
@@ -2291,6 +2495,24 @@ def team_from_entries(t):
     return t
 
 
+def team_keys(S, t):
+    """(active skill players, active K/DEF keys) for a synced team, worked out from its roster entries every time,
+    so leagues saved by any version of the site behave the same."""
+    es = t.get("entries")
+    if not es:
+        return list(t.get("active") or t.get("players") or []), list(t.get("kdef") or [])
+    skill, kdef = [], []
+    for e in es:
+        if e.get("slot") in ("IR", "TAXI"):
+            continue
+        k = entry_key(e)
+        if not k:
+            continue
+        pos = e.get("pos") or (S.players.get(k) or {}).get("pos")
+        (kdef if pos in ("K", "DEF") else skill if pos in pr.FANTASY_POS else []).append(k)
+    return list(dict.fromkeys(skill)), list(dict.fromkeys(kdef))
+
+
 def entry_key(e):
     """Projection key for a roster entry: gsis id for players and kickers, DST:<team> for defenses."""
     if e.get("key"):
@@ -2300,6 +2522,23 @@ def entry_key(e):
     if e.get("pos") == "DEF" and e.get("team"):
         return f"DST:{e['team']}"
     return None
+
+
+def kdef_pool(S, kind, week):
+    """Projections for every kicker (anyone who kicked this season) or every team defense, best first."""
+    cache = S.__dict__.setdefault("_kdef_pool", {})
+    if (kind, week) not in cache:
+        if kind == "K":
+            last_kick = {}
+            for (kid, wk) in S.k_games:
+                last_kick[kid] = max(wk, last_kick.get(kid, 0))
+            recent = max(last_kick.values()) if last_kick else 0
+            ids = [k for k, w in last_kick.items() if w >= recent - 2]  # still kicking recently
+            ps = [pr.project_kdef(S, "K", k, week) for k in ids]
+        else:
+            ps = [pr.project_kdef(S, "DEF", t, week) for t in sorted(S.team_ctx)]
+        cache[(kind, week)] = sorted([p for p in ps if not p["bye"]], key=lambda p: -p["proj"])
+    return cache[(kind, week)]
 
 
 def project_any(S, key, week=None):
@@ -2883,7 +3122,8 @@ def grp_header(title, total=None):
 def player_line(S, e, p, week, badge=""):
     slot = e["slot"]
     if e.get("pos") in ("K", "DEF") or not e.get("gid"):
-        lab, hint, hcol = kdef_hint(S, e, week) if e.get("pos") in ("K", "DEF") else ("", "Not matched", MUTED)
+        lab, hint, hcol = kdef_hint(S, e, week) if e.get("pos") in ("K", "DEF") else \
+            ("", "No eligible player on the roster" if e.get("name") == "Empty slot" else "Not matched", MUTED)
         if p and p.get("bye"):
             hint, hcol = "BYE", RED
         name = esc(e["name"])
@@ -2945,8 +3185,27 @@ def lineup_moves(S, entries, rec_lineup, projs):
                   and s_["pos"] not in ("K", "DEF")), None)
         if partner:
             used.add(partner["pid"])
-        moves.append({"start": s_, "sit": partner, "gain": s_["proj"] - (partner["proj"] if partner else 0)})
+        gain = s_["proj"] - (partner["proj"] if partner else 0)
+        risky = bool(s_.get("inj_detail")) and s_.get("injf", 1) < 1
+        moves.append({"start": s_, "sit": partner, "gain": gain, "check": risky and gain < 2.5})
     return moves
+
+
+def same_team_notes(lineup):
+    """Starters sharing a backfield / receiver room: explain that projections already account for it."""
+    groups = defaultdict(list)
+    for l in lineup:
+        p = l["p"]
+        if p and p["pos"] in ("RB", "WR", "TE", "QB") and p.get("team"):
+            groups[(p["team"], p["pos"])].append(p)
+    out = []
+    for (team, pos), ps in groups.items():
+        if len(ps) >= 2 and pos in ("RB", "QB"):
+            names = " and ".join(p["name"] for p in ps)
+            out.append(f"{names} share the {team} {'backfield' if pos == 'RB' else 'QB room'}. Their projections "
+                       f"already account for splitting the work, and both start only because both still project "
+                       f"higher than your other options.")
+    return out
 
 
 def set_total_of(es, projs):
@@ -3022,13 +3281,20 @@ def lineup_compare(S, t, T, week, slots):
         for mv in moves:
             s_, o = mv["start"], mv["sit"]
             nm = (lambda p: esc(p["name"]) if p.get("kdef") else plink(p["pid"], p["name"]))
+            tag = ('<span class="fr-tag sit">CHECK STATUS</span>' if mv.get("check") else "")
+            why = (f'<div class="fr-dim" style="flex-basis:100%;margin-top:-.15rem">{esc(s_["name"])} is '
+                   f'{esc(s_.get("inj_detail") or "on the injury report")}; the edge is small, so only make this swap '
+                   f'if he\'s confirmed active.</div>' if mv.get("check") else "")
             items.append(f'<div class="fr-move"><div class="fr-move-side in"><span class="fr-tag start">START</span>'
                          f'{logo(s_["team"], 22)} {nm(s_)} <span class="fr-dim">{s_["pos"]} · {s_["proj"]:.1f}</span></div>'
                          f'<div class="fr-move-arrow">⇄</div><div class="fr-move-side out"><span class="fr-tag sit">BENCH</span>'
                          + (f'{logo(o["team"], 22)} {nm(o)} <span class="fr-dim">{o["pos"]} · {o["proj"]:.1f}</span>'
                             if o else '<span class="fr-dim">open slot</span>')
-                         + f'</div><div class="fr-move-gain">{mv["gain"]:+.1f}</div></div>')
+                         + f'</div><div class="fr-move-gain">{tag} {mv["gain"]:+.1f}</div>{why}</div>')
         H("".join(items))
+    stn = same_team_notes(T["lineup"])
+    if stn:
+        H(notes_html([("info", x) for x in stn]))
     set_rows = ordered_entries(es, "start") if has_slots else []
     by_key = {entry_key(e): e for e in es if entry_key(e)}
     rec_rows = []
@@ -3180,13 +3446,13 @@ def league_report(_S, key, _league):
     owner_of = {pid: t for t in league["teams"] for pid in t["players"]}
     out = {"week": week, "teams": {}, "owner_of": owner_of}
     for t in league["teams"]:
-        out["teams"][t["id"]] = team_strength(S, (t.get("active") or t["players"]) + (t.get("kdef") or []), slots, n,
-                                              week)
+        skill, kdef = team_keys(S, t)
+        out["teams"][t["id"]] = team_strength(S, skill + kdef, slots, n, week)
     my = league.get("my_team")
     if my and my in out["teams"]:
         me = next(t for t in league["teams"] if t["id"] == my)
-        out["mine"] = analyze_team(S, {"roster": me.get("active") or me["players"], "slots": slots,
-                                       "teams_in_league": n},
+        skill, kdef = team_keys(S, me)
+        out["mine"] = analyze_team(S, {"roster": skill + kdef, "slots": slots, "teams_in_league": n},
                                    owner_of=owner_of, my_team_id=my)
         out["partners"] = trade_partners(S, league, out, my)
         out["waivers"] = waiver_targets(S, league, out, my)
@@ -3232,6 +3498,8 @@ def trade_partners(S, league, R, my):
 
 def waiver_targets(S, league, R, my):
     owned = set(R["owner_of"])
+    for t in league["teams"]:
+        owned.update(team_keys(S, t)[1])
     mine = R["teams"][my]
     week = R["week"]
     out = {}
@@ -3253,6 +3521,20 @@ def waiver_targets(S, league, R, my):
                         "upgrade": p["proj"] - floor_})
         fas.sort(key=lambda x: -x["ros"])
         out[pos] = fas[:8]
+    slots = {**DEFAULT_SLOTS, **(league.get("slots") or {})}
+    mine_kdef = {l["slot"]: l["p"]["proj"] for l in mine["lineup"] if l["p"] and l["slot"] in ("K", "DEF")}
+    for kind in ("K", "DEF"):
+        if not slots.get(kind):
+            continue
+        fas = []
+        for p in kdef_pool(S, kind, week):
+            if p["pid"] in owned:
+                continue
+            ident = p["pid"][4:] if kind == "DEF" else p["pid"]
+            fas.append({"p": p, "ros": pr.ros_kdef(S, kind, ident), "trend": None,
+                        "upgrade": p["proj"] - mine_kdef.get(kind, 0)})
+        fas.sort(key=lambda x: -x["p"]["proj"])  # K and DEF are streamed week to week
+        out[kind] = fas[:6]
     return out
 
 
@@ -3563,8 +3845,29 @@ def render_league(S, store, owner, row, season):
                                                      f'<span style="color:{GREEN}">{x["ros"]:.0f}</span>'))
                     H(list_card(f"{pos}s", "Ranked by rest-of-season points", GREEN if pos in
                                 R["teams"][pick]["needs"] else BLUE, items))
-            st.caption("Green header = a position you need. Number on the right = projected rest-of-season points. "
-                       "'Usage ▲' = his role grew over the last 3 games, often the best waiver signal.")
+            kd = [k for k in ("K", "DEF") if W.get(k)]
+            if kd:
+                sec(f"Kickers and defenses to stream in week {week}")
+                cols = st.columns(2)
+                for i, kind in enumerate(kd):
+                    with cols[i % 2]:
+                        items = []
+                        for x in W[kind]:
+                            p = x["p"]
+                            up = x["upgrade"]
+                            items.append(
+                                f'<div class="it"><div style="display:flex;gap:.55rem;align-items:center">{logo(p["team"], 24)}'
+                                f'<div><b style="color:{TEXT}">{esc(p["name"])}</b><div class="sm">{esc(p["label"])} · '
+                                f'{esc(p["reasons"][-1][1]) if p["reasons"] else ""}</div></div></div>'
+                                f'<div class="num" style="color:{GREEN if up > 0.5 else MUTED}">{p["proj"]:.1f}'
+                                f'<div class="sm" style="text-align:right">{up:+.1f} vs yours</div></div></div>')
+                        H(list_card("Kickers" if kind == "K" else "Defenses",
+                                    f"Ranked by week {week} projection under this league's scoring",
+                                    GREEN if any(x["upgrade"] > 0.5 for x in W[kind]) else BLUE, items))
+            st.caption("Green header = a position you need (or, for K/DEF, a better option than yours this week). "
+                       "Skill players: number = projected rest-of-season points; 'Usage ▲' = his role grew over the last "
+                       "3 games, often the best waiver signal. K/DEF: number = this week's projection, since they're "
+                       "usually streamed.")
     with tabs[5]:
         order = sorted(lg["teams"], key=lambda t: -R["teams"][t["id"]]["ros_total"])
         accents = {t["id"]: TEAM_ACCENTS[i % len(TEAM_ACCENTS)] for i, t in enumerate(sorted(lg["teams"],

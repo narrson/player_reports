@@ -274,6 +274,7 @@ class Season:
         self.xfp_raw = {}
         self.schedule = []
         self.injuries = {}
+        self.inj_hist = defaultdict(list)
         self.idmap = {"sleeper": {}, "espn": {}, "yahoo": {}}
         self._pool = {}
 
@@ -456,9 +457,14 @@ def load_season(S):
             pid, wk = r.get("gsis_id"), g(r, "week", 0)
             if g(r, "game_type", "REG") != "REG" or not pid:
                 continue
+            row = {"week": wk, "status": g(r, "report_status"), "injury": g(r, "report_primary_injury"),
+                   "practice": g(r, "practice_status"), "practice_injury": g(r, "practice_primary_injury"),
+                   "updated": str(g(r, "date_modified") or "")[:16]}
+            S.inj_hist[pid].append(row)
             if pid not in S.injuries or wk >= S.injuries[pid]["week"]:
-                S.injuries[pid] = {"week": wk, "status": g(r, "report_status"),
-                                   "injury": g(r, "report_primary_injury"), "practice": g(r, "practice_status")}
+                S.injuries[pid] = row
+        for rows in S.inj_hist.values():
+            rows.sort(key=lambda x: (x["week"], x["updated"]))
 
     def _ids():
         for r in nfl.load_ff_playerids().to_dicts():
@@ -1700,8 +1706,62 @@ def _week_implied_mean(S, week):
     return S._imp_mean[week]
 
 
+OUT_WORDS = ("out", "injured reserve", "ir", "doubtful", "pup", "suspended", "not active")
+
+
+def current_status(S, pid):
+    """Latest injury-report status for this week, or None."""
+    inj = S.injuries.get(pid)
+    if inj and inj.get("status") and inj["week"] >= S.last_week:
+        return inj
+    return None
+
+
+def likely_out(S, pid):
+    inj = current_status(S, pid)
+    return bool(inj and any(w in str(inj["status"]).lower() for w in OUT_WORDS))
+
+
+def played_week(S, pid, wk):
+    if any(r["week"] == wk for r in S.weekly.get(pid, [])):
+        return True
+    sn = S.snaps.get((pid, wk))
+    return bool(sn and (sn[0] or 0) > 0)
+
+
+def key_teammates(S, pid, pos, team):
+    """Same-team, same-position players who take a real share of the work."""
+    if not hasattr(S, "_team_pos"):
+        S._team_pos = defaultdict(list)
+        for q, t in S.season_tot.items():
+            S._team_pos[(player_team(S, q), t["pos"])].append(q)
+    out = []
+    for q in S._team_pos.get((team, pos), []):
+        if q == pid:
+            continue
+        t = S.season_tot[q]
+        if t["games"] >= 2 and t["ppg"] >= (8 if pos == "QB" else 5):
+            out.append(q)
+    return out
+
+
+def _usage_base(S, pid, pos, weeks):
+    m = player_metrics(S, pid, pos, weeks)
+    l3 = player_metrics(S, pid, pos, weeks[-3:]) if len(weeks) >= 4 else None
+    xs, xl = m.get("xfp_pg"), (l3 or {}).get("xfp_pg")
+    if xs is not None:
+        x = 0.55 * xs + 0.45 * xl if xl is not None else xs
+        eff = (m.get("eff_oe_pg") or 0) * 0.5 * min(1.0, m["games"] / 8)
+        return max(0.0, x + eff), m, xs, xl, "usage"
+    ppg, l3p = m.get("ppg"), (l3 or {}).get("ppg")
+    base = (0.6 * ppg + 0.4 * l3p) if (ppg is not None and l3p is not None) else (ppg or 0.0)
+    return base, m, xs, xl, "scoring"
+
+
 def player_base(S, pid):
-    """Usage-driven points per game before matchup: blended expected points plus the sticky part of efficiency."""
+    """Usage-driven points per game before matchup: blended expected points plus the sticky part of efficiency.
+    Depth-chart aware: if a key same-position teammate is expected back (or out) this week, the projection leans
+    on the games that match that situation, so a backup isn't credited with a starter's workload."""
     if not hasattr(S, "_base"):
         S._base = {}
     if pid in S._base:
@@ -1713,26 +1773,85 @@ def player_base(S, pid):
         return None
     weeks = player_weeks(S, pid)
     pool = S._pool.get(pos, ({}, 0))[0]
-    m = pool.get(pid) or player_metrics(S, pid, pos, weeks)
-    l3 = player_metrics(S, pid, pos, weeks[-3:]) if len(weeks) >= 4 else None
-    xs, xl = m.get("xfp_pg"), (l3 or {}).get("xfp_pg")
-    if xs is not None:
-        x = 0.55 * xs + 0.45 * xl if xl is not None else xs
-        eff = (m.get("eff_oe_pg") or 0) * 0.5 * min(1.0, m["games"] / 8)
-        base = max(0.0, x + eff)
-        src = "usage"
-    else:
-        ppg, l3p = m.get("ppg"), (l3 or {}).get("ppg")
-        base = (0.6 * ppg + 0.4 * l3p) if (ppg is not None and l3p is not None) else (ppg or 0.0)
-        src = "scoring"
+    base, m, xs, xl, src = _usage_base(S, pid, pos, weeks)
+    if pid in pool:
+        m = pool[pid]
+    depth = None
+    team = player_team(S, pid)
+    mates = key_teammates(S, pid, pos, team) if team else []
+    if mates and len(weeks) >= 3:
+        full = base
+
+        def scenario(active, out_now):
+            """Base from the games that match this availability, or None if the situation hasn't changed."""
+            match = [w for w in weeks if all(played_week(S, q, w) for q in active)
+                     and not any(played_week(S, q, w) for q in out_now)]
+            changed = [q for q in active if any(not played_week(S, q, w) for w in weeks)] + \
+                      [q for q in out_now if any(played_week(S, q, w) for w in weeks)]
+            if not changed or len(match) == len(weeks):
+                return full, len(weeks), []
+            if len(match) < 2:
+                return full, len(match), changed
+            b2 = _usage_base(S, pid, pos, match)[0]
+            w_ = 0.85 if len(match) >= 4 else 0.7
+            return w_ * b2 + (1 - w_) * full, len(match), changed
+        active = [q for q in mates if not likely_out(S, q)]
+        out_now = [q for q in mates if likely_out(S, q)]
+        b_act, n_act, ch_act = scenario(active, out_now)
+        # A questionable key teammate: blend "he plays" and "he sits" by his chance of playing
+        q_mates = [(q, injury_factor(current_status(S, q))[0]) for q in active]
+        q_mates = [(q, p_) for q, p_ in q_mates if p_ < 0.99]
+        if q_mates:
+            q, p_play = min(q_mates, key=lambda x: x[1])
+            b_out, n_out, _ = scenario([x for x in active if x != q], out_now + [q])
+            base = p_play * b_act + (1 - p_play) * b_out
+            names = (S.players.get(q) or {}).get("name") or q
+            depth = {"from": full, "to": base, "games": n_act, "names": names, "verb": "questionable",
+                     "p": p_play}
+        elif ch_act:
+            names = ", ".join((S.players.get(q) or {}).get("name") or q for q in ch_act[:2])
+            if n_act >= 2:
+                verb = "active" if any(q in active for q in ch_act) else "out"
+                depth = {"from": full, "to": b_act, "games": n_act, "names": names, "verb": verb}
+                base = b_act
+            else:
+                depth = {"from": full, "to": full, "games": n_act, "names": names, "verb": "few"}
+    # First game back after missing the team's most recent game
+    returning = False
+    if team and weeks and S.last_week and weeks[-1] < S.last_week:
+        gm = team_game(S, team, S.last_week)
+        if gm and gm["home_score"] is not None and not played_week(S, pid, S.last_week) and not likely_out(S, pid):
+            returning = True
+            base *= 0.92
     pts = [r["pts"] for r in S.weekly.get(pid, [])]
     sd_p = statistics.pstdev(pts) if len(pts) > 1 else POS_SD[pos]
     n = len(pts)
     sd = (sd_p * n + POS_SD[pos] * 4) / (n + 4)
     out = {"pid": pid, "pos": pos, "m": m, "base": base, "xfp_season": xs, "xfp_last3": xl, "src": src, "sd": sd,
-           "games": m["games"]}
+           "games": m["games"], "depth": depth, "returning": returning, "team": team}
     S._base[pid] = out
     return out
+
+
+def injury_factor(inj):
+    """Chance-weighted availability from the injury report, using practice participation for Questionable."""
+    if not inj:
+        return 1.0, None
+    s_ = str(inj.get("status") or "").lower()
+    pr_ = str(inj.get("practice") or "").lower()
+    if any(w in s_ for w in ("out", "injured reserve", "pup", "suspend")) or s_ == "ir":
+        return 0.0, "out"
+    if "doubtful" in s_:
+        return 0.25, "doubtful"
+    if "questionable" in s_:
+        if "did not" in pr_ or "dnp" in pr_:
+            return 0.72, "Q, did not practice"
+        if "limited" in pr_:
+            return 0.88, "Q, limited practice"
+        if "full" in pr_:
+            return 0.96, "Q, full practice"
+        return 0.85, "questionable"
+    return 1.0, None
 
 
 def project_player(S, pid, week=None, injuries=True):
@@ -1767,11 +1886,11 @@ def project_player(S, pid, week=None, injuries=True):
             imp = h if home else gm["total"] - h
             out["implied"] = imp
             vf = _clamp(1 + 0.4 * (imp / _week_implied_mean(S, week) - 1), 0.88, 1.12)
-    inj = S.injuries.get(pid)
-    if injuries and inj and inj.get("status") and inj["week"] >= S.last_week:
-        st_ = str(inj["status"]).lower()
-        injf = next((v for k, v in INJURY_FACTOR.items() if k in st_), 1.0)
+    inj = current_status(S, pid) if injuries else None
+    if inj:
+        injf, why = injury_factor(inj)
         out["inj_status"] = inj["status"] + (f" ({inj['injury']})" if inj.get("injury") else "")
+        out["inj_detail"] = why
     proj = b["base"] * mf * vf * injf
     sd = b["sd"] * (proj / b["base"] if b["base"] > 0 else 1) if injf > 0 else 0
     boom = BOOM_BUST[pos][0]
@@ -1800,7 +1919,25 @@ def project_player(S, pid, week=None, injuries=True):
         out["reasons"].append(("up" if vf > 1.02 else "down" if vf < 0.98 else "info",
                                f"Vegas implies {out['implied']:.1f} points for {team} ({int(round((vf - 1) * 100)):+d}%)."))
     if out["inj_status"]:
-        out["reasons"].append(("down", f"Injury report: {out['inj_status']} ({int(round((injf - 1) * 100)):+d}%)."))
+        prac = f", {inj['practice'].lower()}" if inj.get("practice") else ""
+        out["reasons"].append(("down", f"Injury report: {out['inj_status']}{prac} "
+                                       f"({int(round((injf - 1) * 100)):+d}%)."))
+    d = b.get("depth")
+    if d and d["verb"] in ("active", "out"):
+        chg = d["to"] - d["from"]
+        out["reasons"].append(("up" if chg > 0 else "down",
+                               f"Depth chart: with {d['names']} {d['verb']} this week, based on the {d['games']} games "
+                               f"that matched ({chg:+.1f} pts vs. his full-season usage)."))
+    elif d and d["verb"] == "questionable":
+        chg = d["to"] - d["from"]
+        out["reasons"].append(("up" if chg > 0 else "down",
+                               f"Depth chart: {d['names']} is questionable (~{d['p']:.0%} to play); projection blends "
+                               f"his role with and without him ({chg:+.1f} pts vs. full-season usage)."))
+    elif d and d["verb"] == "few":
+        out["reasons"].append(("info", f"Depth chart: {d['names']} returning; only {d['games']} game(s) together so "
+                                       f"far, so this projection may run high."))
+    if b.get("returning") and injuries:
+        out["reasons"].append(("down", "Missed his team's last game; first game back (-8%)."))
     return out
 
 
