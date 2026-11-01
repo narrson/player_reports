@@ -31,6 +31,16 @@ import player_report as pr
 st.set_page_config(page_title="Fantasy Player Reports", page_icon="🏈", layout="wide",
                    initial_sidebar_state="collapsed")
 
+REQUIRED_ENGINE = 8
+if getattr(pr, "ENGINE_VERSION", 0) < REQUIRED_ENGINE:
+    # Streamlit can keep an old copy of player_report.py loaded after an update; load the new one.
+    import importlib
+    pr = importlib.reload(pr)
+if getattr(pr, "ENGINE_VERSION", 0) < REQUIRED_ENGINE:
+    st.error("**The site's files are out of sync.** app.py was updated but player_report.py is still the older "
+             "version. Upload the newest player_report.py to GitHub, then reboot the app (Manage app → ⋮ → Reboot).")
+    st.stop()
+
 # ------------------------------------------------------------------------------------
 # Design system
 # ------------------------------------------------------------------------------------

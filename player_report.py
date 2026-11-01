@@ -54,6 +54,8 @@ from collections import Counter, defaultdict
 from datetime import date, datetime
 from pathlib import Path
 
+ENGINE_VERSION = 8  # app.py checks this so the website and the engine always match
+
 # ================================ SETTINGS ==========================================
 # Edit these to match your league. Command-line flags override the first two.
 SEASON = 2026
