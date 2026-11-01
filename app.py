@@ -2553,9 +2553,15 @@ def decode_sync(code):
     code = (code or "").strip()
     if not code or len(code) > 400_000:
         raise ValueError("That sync code is empty or too large.")
-    code += "=" * (-len(code) % 4)
+    import zlib
+    packed = code.startswith("z")
+    body = code[1:] if packed else code
+    body += "=" * (-len(body) % 4)
     try:
-        return _json.loads(base64.urlsafe_b64decode(code.encode()).decode("utf-8"))
+        raw = base64.urlsafe_b64decode(body.encode())
+        if packed:
+            raw = zlib.decompress(raw, -15)
+        return _json.loads(raw.decode("utf-8"))
     except Exception:
         raise ValueError("That sync code couldn't be read. Run the bookmark again.")
 
@@ -2572,12 +2578,18 @@ def league_from_sync(S, payload):
     raise ValueError("Unknown sync source.")
 
 
-BOOKMARK_VERSION = 3
+BOOKMARK_VERSION = 4
 BOOKMARKLET_JS = r"""(async()=>{const SITE='__SITE__';
-const go=o=>{o.v=3;const b=btoa(unescape(encodeURIComponent(JSON.stringify(o)))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
-try{navigator.clipboard.writeText(b)}catch(e){}
-const u=SITE+'/?sync='+b;if(u.length>60000){alert('Big league! The sync code was copied. Paste it on the site under Sync a league.');return}
-location.href=u};
+const b64=u=>{let s='';for(let i=0;i<u.length;i+=8192)s+=String.fromCharCode.apply(null,u.subarray(i,i+8192));return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')};
+const enc=async o=>{const raw=new TextEncoder().encode(JSON.stringify(o));try{const st=new Blob([raw]).stream().pipeThrough(new CompressionStream('deflate-raw'));return 'z'+b64(new Uint8Array(await new Response(st).arrayBuffer()))}catch(e){return b64(raw)}};
+const go=async o=>{o.v=4;const b=await enc(o);const u=SITE+'/?sync='+b;if(u.length<=7000){location.href=u;return}
+const d=document.createElement('div');d.style.cssText='position:fixed;z-index:2147483647;top:20px;right:20px;width:380px;background:#121a2b;color:#e6edf3;border:2px solid #f5b301;border-radius:14px;padding:18px;font:14px sans-serif;box-shadow:0 10px 40px rgba(0,0,0,.5)';
+d.innerHTML='<b style="font-size:16px">Your league is ready</b><p style="color:#8b98ad;margin:8px 0 12px">It is too big to send in a link, so it goes through your clipboard.</p>';
+const bt=document.createElement('button');bt.textContent='Copy & open Fantasy Reports';bt.style.cssText='width:100%;padding:12px;border:0;border-radius:10px;background:#f5b301;color:#111;font-weight:800;font-size:15px;cursor:pointer';
+bt.onclick=async()=>{try{await navigator.clipboard.writeText(b)}catch(e){const t=document.createElement('textarea');t.value=b;document.body.appendChild(t);t.select();document.execCommand('copy');t.remove()}window.open(SITE+'/?sync=paste','_blank');d.remove()};
+const x=document.createElement('div');x.textContent='Cancel';x.style.cssText='text-align:center;margin-top:10px;color:#8b98ad;cursor:pointer';x.onclick=()=>d.remove();
+d.appendChild(bt);d.appendChild(x);document.body.appendChild(d)};
+const trim=a=>{while(a.length&&(a[a.length-1]===''||a[a.length-1]==null))a.pop();return a};
 const h=location.hostname,p=location.pathname;
 try{
 if(h.includes('sleeper')){const m=p.match(/leagues\/(\d+)/);if(!m)return alert('Open your Sleeper league first, then tap this bookmark.');return go({src:'sleeper',league:m[1]})}
@@ -2586,10 +2598,10 @@ const yr=q.get('seasonId')||new Date().getFullYear();
 const r=await fetch('https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/'+yr+'/segments/0/leagues/'+lid+'?view=mTeam&view=mRoster&view=mSettings&view=mMatchup',{credentials:'include'});
 if(!r.ok)return alert('ESPN returned '+r.status+'. Make sure you are logged in to ESPN.');
 const d=await r.json();const per=(d.status||{}).currentMatchupPeriod;const ss=d.settings||{};
-return go({src:'espn',league:lid,season:+yr,my:q.get('teamId'),data:{settings:{name:ss.name,rosterSettings:{lineupSlotCounts:(ss.rosterSettings||{}).lineupSlotCounts},scoringSettings:{scoringItems:((ss.scoringSettings||{}).scoringItems||[]).map(i=>({statId:i.statId,points:i.points,pointsOverrides:i.pointsOverrides}))}},
+return go({src:'espn',league:lid,season:+yr,my:q.get('teamId'),data:{settings:{name:ss.name,rosterSettings:{lineupSlotCounts:(ss.rosterSettings||{}).lineupSlotCounts},scoringSettings:{scoringItems:((ss.scoringSettings||{}).scoringItems||[]).filter(i=>[3,4,19,20,24,25,26,42,43,44,53,72,101,102].includes(i.statId)).map(i=>({statId:i.statId,points:i.points,pointsOverrides:i.pointsOverrides}))}},
 members:(d.members||[]).map(m=>({id:m.id,displayName:m.displayName})),status:{currentMatchupPeriod:per},
 schedule:(d.schedule||[]).filter(s=>s.matchupPeriodId==per).map(s=>({matchupPeriodId:s.matchupPeriodId,home:{teamId:(s.home||{}).teamId},away:{teamId:(s.away||{}).teamId}})),
-teams:(d.teams||[]).map(t=>({id:t.id,name:t.name,location:t.location,nickname:t.nickname,owners:t.owners,record:{overall:((t.record||{}).overall)||{}},roster:{entries:((t.roster||{}).entries||[]).map(e=>{const pl=((e.playerPoolEntry||{}).player)||{};return {playerId:e.playerId,lineupSlotId:e.lineupSlotId,playerPoolEntry:{player:{fullName:pl.fullName,defaultPositionId:pl.defaultPositionId,proTeamId:pl.proTeamId,injuryStatus:pl.injuryStatus}}}})}}))}})}
+teams:(d.teams||[]).map(t=>({id:t.id,name:t.name||((t.location||'')+' '+(t.nickname||'')).trim(),owners:t.owners,record:{overall:((t.record||{}).overall)||{}},roster:{entries:((t.roster||{}).entries||[]).map(e=>{const pl=((e.playerPoolEntry||{}).player)||{};return {playerId:e.playerId,lineupSlotId:e.lineupSlotId,playerPoolEntry:{player:{fullName:pl.fullName,defaultPositionId:pl.defaultPositionId,proTeamId:pl.proTeamId,injuryStatus:pl.injuryStatus}}}})}}))}})}
 if(h.includes('yahoo')){const m=p.match(/\/f1\/(\d+)/);if(!m)return alert('Open your Yahoo fantasy football league first, then tap this bookmark.');const lid=m[1];
 const P=new DOMParser();const get=async u=>{const r=await fetch(u,{credentials:'include'});return P.parseFromString(await r.text(),'text/html')};
 const home=await get('/f1/'+lid);const names={};let my=null;const re=new RegExp('/f1/'+lid+'/(\\d+)/?$');
@@ -2602,12 +2614,12 @@ doc.querySelectorAll('tr').forEach(tr=>{const a=tr.querySelector('a[href*="/nfl/
 const href=a.getAttribute('href')||'',nm=a.textContent.trim();if(nm.length<2)return;
 const pm=href.match(/players\/(\d+)/),tm=href.match(/teams\/([a-z]+)/);const key=pm?pm[1]:'t'+(tm?tm[1]:nm);if(seen.has(key))return;seen.add(key);
 const pe=tr.querySelector('[data-pos]');let slot=pe?pe.getAttribute('data-pos'):'';if(!slot){const c=tr.querySelector('td');slot=c?c.textContent.trim():''}
-const inj=tr.querySelector('.F-injury');pl.push([pm?pm[1]:'',nm,(slot||'').slice(0,8),pm?'':(tm?tm[1]:''),inj?inj.textContent.trim().slice(0,4):''])});
+const inj=tr.querySelector('.F-injury');pl.push(trim([pm?pm[1]:'',nm,(slot||'').slice(0,8),pm?'':(tm?tm[1]:''),inj?inj.textContent.trim().slice(0,4):'']))});
 if(!pl.length){doc.querySelectorAll('a[href*="/nfl/players/"]').forEach(a=>{const mm=(a.getAttribute('href')||'').match(/players\/(\d+)/);const t=a.textContent.trim();
 if(mm&&t.length>3&&!seen.has(mm[1])){seen.add(mm[1]);pl.push([mm[1],t])}})}
 if(pl.length)teams.push({id:id,name:names[id]||('Team '+id),players:pl})}
 if(!teams.length)return alert('Could not read the rosters. Make sure you are logged in to Yahoo.');
-let sc=[];try{const sd=await get('/f1/'+lid+'/settings');sd.querySelectorAll('tr').forEach(tr=>{const c=tr.querySelectorAll('td,th');if(c.length>=2){const a=c[0].textContent.trim(),b=c[1].textContent.trim();if(a&&b&&a.length<50&&b.length<60)sc.push([a,b])}});sc=sc.slice(0,200)}catch(e){}
+let sc=[];try{const sd=await get('/f1/'+lid+'/settings');sd.querySelectorAll('tr').forEach(tr=>{const c=tr.querySelectorAll('td,th');if(c.length>=2){const a=c[0].textContent.trim(),b=c[1].textContent.trim();if(a&&b&&a.length<50&&b.length<60&&/passing|rushing|receiving|reception|interception|fumble|2-point|return touchdown/i.test(a))sc.push([a,b])}});sc=sc.slice(0,40)}catch(e){}
 return go({src:'yahoo',league:lid,name:((home.querySelector('title')||{}).textContent||'').split('|')[0].trim(),my:my,teams:teams,sc:sc})}
 alert('Open your league on Yahoo, ESPN or Sleeper first, then tap this bookmark.')
 }catch(e){alert('Sync failed: '+e.message)}})();"""
@@ -3909,6 +3921,34 @@ def page_teams(S, season):
     except Exception as e:
         st.error(f"Couldn't load your teams: {e}")
         return
+    if st.session_state.get("_paste_mode"):
+        H(f'<div class="fr-card" style="border-left:5px solid {GOLD}"><div class="fr-cardh" style="color:{GOLD}">'
+          f'Almost there</div><div style="font-weight:800;color:{TEXT};font-size:1.1rem">Paste your league below</div>'
+          f'<div class="fr-sub">Your league was copied by the bookmark. Click the box and press Ctrl+V (Cmd+V on Mac), '
+          f'then Import.</div></div>')
+        with st.form("paste_sync"):
+            code = st.text_area("Sync code", height=90, label_visibility="collapsed", placeholder="Paste here")
+            c1, c2 = st.columns([1, 4])
+            go_ = c1.form_submit_button("Import league", type="primary", use_container_width=True)
+            stop = c2.form_submit_button("Cancel")
+        if stop:
+            st.session_state.pop("_paste_mode", None)
+            st.rerun()
+        if go_:
+            try:
+                payload = decode_sync(code)
+            except ValueError as e:
+                st.error(str(e))
+                return
+            st.session_state.pop("_paste_mode", None)
+            with st.spinner("Matching players..."):
+                try:
+                    league = league_from_sync(S, payload)
+                except Exception as e:
+                    st.error(f"Couldn't import: {e}")
+                    return
+            finish_import(store, owner, teams, league)
+        return
     if handle_pending_sync(S, store, owner, teams):
         return
     mode = st.session_state.get("team_mode", "view")
@@ -4142,7 +4182,11 @@ def main():
     H(CSS)
     restore_session()
     sync_code = st.query_params.get("sync")
-    if sync_code:
+    if sync_code == "paste":
+        st.session_state._paste_mode = True
+        st.session_state.view = "My Teams"
+        st.query_params.pop("sync", None)
+    elif sync_code:
         st.session_state._pending_sync = sync_code
         st.session_state.view = "My Teams"
         st.query_params.pop("sync", None)
