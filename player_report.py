@@ -70,6 +70,7 @@ SCORING = {
     "two_pt": 2,
     "fum_lost": -2,
     "st_td": 6,                    # return touchdowns
+    "te_rec": 0,                   # TE premium: extra points per TE reception
 }
 FANTASY_PLAYOFF_WEEKS = (15, 16, 17)
 BOOM_BUST = {"QB": (25, 12), "RB": (20, 8), "WR": (20, 8), "TE": (15, 6)}  # (boom at or above, bust below)
@@ -77,7 +78,8 @@ CACHE_HOURS = 6
 # ====================================================================================
 
 FORMAT_REC = {"standard": 0.0, "half": 0.5, "ppr": 1.0}
-FORMAT_LABEL = {"standard": "Standard scoring", "half": "Half-PPR scoring", "ppr": "PPR scoring"}
+FORMAT_LABEL = {"standard": "Standard scoring", "half": "Half-PPR scoring", "ppr": "PPR scoring",
+                "custom": "League scoring"}
 FANTASY_POS = ("QB", "RB", "WR", "TE")
 STARTER_CUTOFF = {"QB": 12, "RB": 24, "WR": 24, "TE": 12}
 
@@ -106,6 +108,10 @@ PBP_COLS = [
     "rush", "xpass", "wp", "score_differential", "half_seconds_remaining", "shotgun",
     "no_huddle", "goal_to_go",
 ] + [c for c, _ in ROLE_COLS]
+
+XFP_KEYS = ["receptions_exp", "rec_yards_gained_exp", "rec_touchdown_exp", "rush_yards_gained_exp",
+            "rush_touchdown_exp", "pass_yards_gained_exp", "pass_touchdown_exp", "pass_interception_exp",
+            "rec_two_point_conv_exp", "rush_two_point_conv_exp", "pass_two_point_conv_exp"]
 
 FTN_FLAGS = [
     "is_drop", "is_catchable_ball", "is_contested_ball", "is_created_reception",
@@ -216,7 +222,8 @@ def fmt(v, kind):
 def fantasy_points(r, sc):
     return (sc["pass_yd"] * r["pass_yds"] + sc["pass_td"] * r["pass_td"] + sc["int"] * r["ints"]
             + sc["rush_yd"] * r["rush_yds"] + sc["rush_td"] * r["rush_td"]
-            + sc["rec"] * r["rec"] + sc["rec_yd"] * r["rec_yds"] + sc["rec_td"] * r["rec_td"]
+            + (sc["rec"] + (sc.get("te_rec", 0) if r.get("pos") == "TE" else 0)) * r["rec"]
+            + sc["rec_yd"] * r["rec_yds"] + sc["rec_td"] * r["rec_td"]
             + sc["two_pt"] * r["two_pt"] + sc["fum_lost"] * r["fum_lost"] + sc["st_td"] * r["st_td"])
 
 
@@ -258,6 +265,7 @@ class Season:
         self.ngs_pool = {}
         self.xfp = {}
         self.xfp_basis = None
+        self.xfp_raw = {}
         self.schedule = []
         self.injuries = {}
         self.idmap = {"sleeper": {}, "espn": {}, "yahoo": {}}
@@ -409,10 +417,7 @@ def load_season(S):
             df = nfl.load_ff_opportunity(seasons=S.season, stat_type="weekly", model_version="latest")
         except TypeError:
             df = nfl.load_ff_opportunity(S.season)
-        sc = S.scoring
-        comp = ["receptions_exp", "rec_yards_gained_exp", "rec_touchdown_exp", "rush_yards_gained_exp",
-                "rush_touchdown_exp", "pass_yards_gained_exp", "pass_touchdown_exp", "pass_interception_exp"]
-        has_comp = all(k in df.columns for k in comp)
+        has_comp = all(k in df.columns for k in XFP_KEYS[:8])
         S.xfp_basis = "your scoring" if has_comp else "full PPR (nflverse default)"
         for r in df.to_dicts():
             if g(r, "season_type", "REG") != "REG":
@@ -420,22 +425,11 @@ def load_season(S):
             pid, wk = r.get("player_id"), r.get("week")
             if not pid or wk is None:
                 continue
-            wk = int(wk)
-            if has_comp:
-                x = (sc["rec"] * num(r, "receptions_exp") + sc["rec_yd"] * num(r, "rec_yards_gained_exp")
-                     + sc["rec_td"] * num(r, "rec_touchdown_exp") + sc["rush_yd"] * num(r, "rush_yards_gained_exp")
-                     + sc["rush_td"] * num(r, "rush_touchdown_exp") + sc["pass_yd"] * num(r, "pass_yards_gained_exp")
-                     + sc["pass_td"] * num(r, "pass_touchdown_exp") + sc["int"] * num(r, "pass_interception_exp")
-                     + sc["two_pt"] * (num(r, "rec_two_point_conv_exp") + num(r, "rush_two_point_conv_exp")
-                                       + num(r, "pass_two_point_conv_exp")))
-            else:
-                x = g(r, "total_fantasy_points_exp")
-            if x is None:
-                continue
-            S.xfp[(pid, wk)] = {"xfp": x, "exp_rec_td": num(r, "rec_touchdown_exp"),
-                                "exp_rush_td": num(r, "rush_touchdown_exp"),
-                                "exp_pass_td": num(r, "pass_touchdown_exp")}
-        if not S.xfp:
+            raw = {k: num(r, k) for k in XFP_KEYS} if has_comp else {}
+            raw["total"] = g(r, "total_fantasy_points_exp")
+            raw["pos"] = norm_pos(g(r, "position"))
+            S.xfp_raw[(pid, int(wk))] = raw
+        if not S.xfp_raw:
             raise ValueError("no rows")
 
     def _schedule():
@@ -500,20 +494,72 @@ def load_season(S):
 # League-wide precompute (pure Python from here on)
 # ------------------------------------------------------------------------------------
 
-def prepare(S):
-    sc = S.scoring
-    for r in S.pbp:
-        r["_ftn"] = S.ftn.get((r.get("game_id"), r.get("play_id")))
-    S.snap_weeks = defaultdict(set)
-    for (pid, wk), v in S.snaps.items():
-        if (v[0] or 0) > 0:
-            S.snap_weeks[pid].add(wk)
+SCORING_DEPENDENT = {"scoring", "fmt_name", "weekly", "season_tot", "pos_counts", "fpa", "fpa_avg", "xfp", "_pool",
+                     "_base", "_posproj", "weeks_played", "last_week", "min_games", "scoring_key"}
 
-    # Weekly fantasy points and weekly positional finishes
-    S.weekly = defaultdict(list)
-    for r in S.weekly_raw:
-        if r["pos"] not in FANTASY_POS or not r["pid"] or r["week"] is None:
+
+def scoring_key(sc):
+    return tuple(sorted((k, round(float(v), 4)) for k, v in sc.items()))
+
+
+def compute_xfp(S):
+    """Expected fantasy points per player-week under this Season's scoring."""
+    if not S.xfp_raw:
+        return
+    sc = S.scoring
+    S.xfp = {}
+    for key, r in S.xfp_raw.items():
+        if "receptions_exp" in r:
+            rec_pts = sc["rec"] + (sc.get("te_rec", 0) if r.get("pos") == "TE" else 0)
+            x = (rec_pts * r["receptions_exp"] + sc["rec_yd"] * r["rec_yards_gained_exp"]
+                 + sc["rec_td"] * r["rec_touchdown_exp"] + sc["rush_yd"] * r["rush_yards_gained_exp"]
+                 + sc["rush_td"] * r["rush_touchdown_exp"] + sc["pass_yd"] * r["pass_yards_gained_exp"]
+                 + sc["pass_td"] * r["pass_touchdown_exp"] + sc["int"] * r["pass_interception_exp"]
+                 + sc["two_pt"] * (r["rec_two_point_conv_exp"] + r["rush_two_point_conv_exp"]
+                                   + r["pass_two_point_conv_exp"]))
+            exp = (r["rec_touchdown_exp"], r["rush_touchdown_exp"], r["pass_touchdown_exp"])
+        else:
+            x = r.get("total")
+            exp = (0.0, 0.0, 0.0)
+        if x is None:
             continue
+        S.xfp[key] = {"xfp": x, "exp_rec_td": exp[0], "exp_rush_td": exp[1], "exp_pass_td": exp[2]}
+
+
+def prepare(S):
+    prepare_static(S)
+    prepare_scoring(S)
+
+
+def rescore(base, scoring, fmt_name):
+    """A new Season that shares all the loaded data with `base` but uses different scoring.
+    Takes a second or two instead of re-downloading everything."""
+    S = Season.__new__(Season)
+    for k, v in base.__dict__.items():
+        if k not in SCORING_DEPENDENT:
+            setattr(S, k, v)
+    S.scoring, S.fmt_name = dict(scoring), fmt_name
+    S.notes = list(base.notes)
+    S.xfp = dict(getattr(base, "xfp", {})) if not getattr(base, "xfp_raw", None) else {}
+    prepare_scoring(S)
+    return S
+
+
+def prepare_scoring(S):
+    sc = S.scoring
+    S.scoring_key = scoring_key(sc)
+    S._pool = {}
+    for k in ("_base", "_posproj"):
+        if hasattr(S, k):
+            delattr(S, k)
+    compute_xfp(S)
+
+    # Weekly fantasy points and weekly positional finishes (rows copied so each scoring keeps its own)
+    S.weekly = defaultdict(list)
+    for r0 in S.weekly_raw:
+        if r0["pos"] not in FANTASY_POS or not r0["pid"] or r0["week"] is None:
+            continue
+        r = dict(r0)
         r["pts"] = fantasy_points(r, sc)
         S.weekly[r["pid"]].append(r)
     for rows in S.weekly.values():
@@ -560,6 +606,15 @@ def prepare(S):
         for i, (_, v) in enumerate(items, 1):
             v["rank"], v["n"] = i, len(items)
         S.fpa_avg[pos] = mean([v["avg"] for _, v in items])
+
+
+def prepare_static(S):
+    for r in S.pbp:
+        r["_ftn"] = S.ftn.get((r.get("game_id"), r.get("play_id")))
+    S.snap_weeks = defaultdict(set)
+    for (pid, wk), v in S.snaps.items():
+        if (v[0] or 0) > 0:
+            S.snap_weeks[pid].add(wk)
 
     # Team-week totals and per-player play lists from play-by-play
     S.team_week = defaultdict(Counter)

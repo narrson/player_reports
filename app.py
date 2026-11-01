@@ -142,7 +142,7 @@ div[data-testid="stDataFrame"] {{border: 1px solid {BORDER}; border-radius: 12px
         color: {MUTED}; line-height: 1.4;}}
 .fr-gl b {{color: {TEXT}; display: block; font-size: .82rem; margin-bottom: .1rem;}}
 .fr-wk img {{display: block; margin: .25rem auto .1rem;}}
-.fr-slot {{display: inline-flex; align-items: center; justify-content: center; min-width: 50px; height: 24px;
+.fr-slot {{display: inline-flex; align-items: center; justify-content: center; min-width: 52px; height: 30px;
            padding: 0 .4rem; border-radius: 7px; font-size: .68rem; font-weight: 800; letter-spacing: .04em;
            border: 1px solid; flex: none;}}
 .fr-inj {{display: inline-block; margin-left: .35rem; padding: 0 .3rem; border: 1px solid; border-radius: 5px;
@@ -178,6 +178,14 @@ div[data-testid="stDataFrame"] {{border: 1px solid {BORDER}; border-radius: 12px
 .fr-pl-name a:hover {{color: {GOLD} !important;}}
 .fr-pl-meta {{font-size: .74rem; color: {MUTED}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;}}
 .fr-pts {{text-align: right; flex: none; min-width: 52px;}}
+.fr-pts2 {{display: flex; gap: .2rem; flex: none;}}
+.fr-pts2 > div {{text-align: right; min-width: 48px;}}
+.fr-pts2 span {{display: block; font-size: .53rem; letter-spacing: .1em; color: {MUTED}; font-weight: 800;}}
+.fr-pts2 b {{font-size: 1rem; color: {TEXT}; font-weight: 800;}}
+.fr-pts2 b.fin {{color: #4ade80;}}
+.fr-pts2 b.na {{color: #475569; font-weight: 600;}}
+.fr-slot.bn {{background: transparent; border-style: dashed; flex-direction: column; line-height: 1; gap: 1px;}}
+.fr-slot.bn i {{font-style: normal; font-size: .5rem; color: {MUTED}; letter-spacing: .08em;}}
 .fr-pts span {{display: block; font-size: .55rem; letter-spacing: .1em; color: {MUTED}; font-weight: 800;}}
 .fr-pts b {{font-size: 1.02rem; color: {TEXT}; font-weight: 800;}}
 .fr-pts.final span {{color: {GREEN};}}
@@ -340,26 +348,47 @@ def styled_df(df, row_bg=None, cell=None, height=None, **kw):
 # Data (cached on the server, shared by every visit)
 # ------------------------------------------------------------------------------------
 
-DATA_VERSION = 5  # bump whenever player_report.py changes what a Season holds, so stale cached data is dropped
+DATA_VERSION = 6  # bump whenever player_report.py changes what a Season holds, so stale cached data is dropped
+
+
+def preset_scoring(fmt_name):
+    sc = dict(pr.SCORING)
+    sc["rec"] = pr.FORMAT_REC.get(fmt_name, 0.5)
+    sc.setdefault("te_rec", 0)
+    return sc
 
 
 def get_season(season, scoring):
-    return _load_season(season, scoring, DATA_VERSION)
+    """scoring: "half" / "ppr" / "standard", or a full league scoring dict."""
+    base = _load_base(season, DATA_VERSION)
+    if isinstance(scoring, dict):
+        sc, name = {**preset_scoring("half"), **scoring}, "custom"
+        for preset in ("half", "ppr", "standard"):  # a league that matches a preset shares its data
+            if pr.scoring_key(clean_scoring(sc)) == pr.scoring_key(clean_scoring(preset_scoring(preset))):
+                sc, name = preset_scoring(preset), preset
+                break
+    else:
+        sc, name = preset_scoring(scoring), scoring
+    if pr.scoring_key(sc) == base.scoring_key and name == base.fmt_name:
+        return base
+    return _rescored(base, (season, base.loaded_at, pr.scoring_key(sc), name), sc, name)
 
 
-@st.cache_resource(ttl=pr.CACHE_HOURS * 3600, max_entries=2, show_spinner=False)
-def _load_season(season, scoring, version):
-    sc = dict(pr.SCORING)
-    if sc.get("rec") is None:
-        sc["rec"] = pr.FORMAT_REC[scoring]
-    S = pr.Season(season, sc, scoring)
+@st.cache_resource(ttl=pr.CACHE_HOURS * 3600, max_entries=1, show_spinner=False)
+def _load_base(season, version):
+    S = pr.Season(season, preset_scoring("half"), "half")
     pr.load_season(S)
     S.loaded_at = datetime.now()
     return S
 
 
+@st.cache_resource(ttl=pr.CACHE_HOURS * 3600, max_entries=12, show_spinner=False)
+def _rescored(_base, key, _sc, name):
+    return pr.rescore(_base, _sc, name)
+
+
 def skey(S, *extra):
-    return (S.season, S.fmt_name, S.loaded_at) + extra
+    return (S.season, S.fmt_name, getattr(S, "scoring_key", None), S.loaded_at) + extra
 
 
 @st.cache_resource(ttl=pr.CACHE_HOURS * 3600, max_entries=300, show_spinner=False)
@@ -2259,6 +2288,105 @@ def slots_from_entries(entries):
     return out if sum(out.values()) >= 5 else None
 
 
+# ----- League scoring -----
+
+SCORING_FIELDS = [("pass_yd", "Passing yards (points per yard)", 0.04), ("pass_td", "Passing TD", 4.0),
+                  ("int", "Interception thrown", -1.0), ("rush_yd", "Rushing yards (per yard)", 0.1),
+                  ("rush_td", "Rushing TD", 6.0), ("rec", "Reception (PPR)", 0.5),
+                  ("te_rec", "TE premium (extra per TE catch)", 0.0), ("rec_yd", "Receiving yards (per yard)", 0.1),
+                  ("rec_td", "Receiving TD", 6.0), ("fum_lost", "Fumble lost", -2.0), ("two_pt", "2-point conversion", 2.0),
+                  ("st_td", "Return TD", 6.0)]
+
+
+def clean_scoring(sc):
+    out = {}
+    for k, _, d in SCORING_FIELDS:
+        try:
+            out[k] = round(float(sc.get(k, d)), 4)
+        except (TypeError, ValueError):
+            out[k] = d
+    return out
+
+
+def scoring_summary(sc):
+    if not sc:
+        return ""
+    r = sc.get("rec", 0)
+    ppr = "PPR" if r == 1 else "Half-PPR" if r == 0.5 else "Standard" if r == 0 else f"{r:g} PPR"
+    bits = [ppr, f"{sc.get('pass_td', 4):g}-pt pass TD"]
+    py = sc.get("pass_yd", 0.04)
+    if py and abs(py - 0.04) > 1e-6:
+        bits.append(f"1 pt / {1 / py:.0f} pass yds")
+    if sc.get("int", -1) != -1:
+        bits.append(f"{sc['int']:g} INT")
+    if sc.get("te_rec"):
+        bits.append(f"TE +{sc['te_rec']:g}")
+    if sc.get("fum_lost", -2) != -2:
+        bits.append(f"{sc['fum_lost']:g} fumble")
+    return " · ".join(bits)
+
+
+def sleeper_scoring(ss):
+    ss = ss or {}
+
+    def v(*keys, d):
+        for k in keys:
+            if ss.get(k) is not None:
+                return float(ss[k])
+        return d
+    return clean_scoring({"pass_yd": v("pass_yd", d=0.04), "pass_td": v("pass_td", d=4), "int": v("pass_int", d=-1),
+                          "rush_yd": v("rush_yd", d=0.1), "rush_td": v("rush_td", d=6), "rec": v("rec", d=0),
+                          "te_rec": v("bonus_rec_te", d=0), "rec_yd": v("rec_yd", d=0.1), "rec_td": v("rec_td", d=6),
+                          "fum_lost": v("fum_lost", d=-2), "two_pt": v("rec_2pt", "rush_2pt", "pass_2pt", d=2),
+                          "st_td": v("st_td", "kr_td", "pr_td", d=6)})
+
+
+ESPN_STATS = {3: "pass_yd", 4: "pass_td", 20: "int", 24: "rush_yd", 25: "rush_td", 53: "rec", 42: "rec_yd",
+              43: "rec_td", 72: "fum_lost", 44: "two_pt", 101: "st_td", 102: "st_td"}
+
+
+def espn_scoring(items):
+    sc = {k: d for k, _, d in SCORING_FIELDS}
+    sc.update(rec=0, pass_td=4, int=-2)  # ESPN defaults when a category is absent
+    for it in items or []:
+        key = ESPN_STATS.get(it.get("statId"))
+        if key:
+            sc[key] = float(it.get("points") or 0)
+        if it.get("statId") == 53:
+            ov = (it.get("pointsOverrides") or {}).get("6")  # TE slot override = TE premium
+            if ov is not None:
+                sc["te_rec"] = float(ov) - sc["rec"]
+    return clean_scoring(sc)
+
+
+YAHOO_SCORE_LABELS = [("passing yards", "pass_yd"), ("passing touchdowns", "pass_td"), ("interceptions", "int"),
+                      ("rushing yards", "rush_yd"), ("rushing touchdowns", "rush_td"), ("receptions", "rec"),
+                      ("receiving yards", "rec_yd"), ("receiving touchdowns", "rec_td"), ("fumbles lost", "fum_lost"),
+                      ("2-point conversions", "two_pt"), ("return touchdowns", "st_td")]
+
+
+def yahoo_scoring(rows):
+    """rows: [label, value] pairs read from the Yahoo league settings page."""
+    found = {}
+    for row in rows or []:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            continue
+        label, val = str(row[0]).strip().lower(), str(row[1]).strip().lower()
+        key = next((k for lab, k in YAHOO_SCORE_LABELS if label == lab or label.startswith(lab)), None)
+        if not key or key in found:
+            continue  # first match wins (offense is listed before defense)
+        m = re.search(r"(-?\d+(?:\.\d+)?)\s*yards?\s*per\s*point", val)
+        if m and float(m.group(1)):
+            found[key] = 1 / float(m.group(1))
+            continue
+        m = re.search(r"-?\d+(?:\.\d+)?", val)
+        if m:
+            found[key] = float(m.group(0))
+    if len(found) < 4:
+        return None
+    return clean_scoring({**{k: d for k, _, d in SCORING_FIELDS}, "int": -1, "rec": 0.5, **found})
+
+
 # ----- Sleeper -----
 
 def sleeper_import(S, league_id, user_id=None):
@@ -2279,6 +2407,7 @@ def sleeper_import(S, league_id, user_id=None):
     for sl in starter_slots:
         slots[sl] = slots.get(sl, 0) + 1
     rec = (lg.get("scoring_settings") or {}).get("rec", 0)
+    scoring = sleeper_scoring(lg.get("scoring_settings"))
 
     def sentry(sid, slot):
         sid = str(sid)
@@ -2324,7 +2453,7 @@ def sleeper_import(S, league_id, user_id=None):
     return _finish_league({"platform": "sleeper", "league_id": str(league_id), "name": lg.get("name"),
                            "season": int(lg.get("season") or S.season), "rec": rec, "scoring": fmt_for_rec(rec),
                            "slots": slots, "teams": teams, "my_team": my, "opponents": opp, "week": week,
-                           "has_lineups": True,
+                           "has_lineups": True, "scoring_custom": scoring, "scoring_source": "Sleeper",
                            "resync": {"type": "sleeper", "league_id": str(league_id), "user_id": user_id}})
 
 
@@ -2378,6 +2507,7 @@ def espn_from_json(S, data, league_id, season, my_team_id=None, swid=None):
     return _finish_league({"platform": "espn", "league_id": str(league_id), "name": st_.get("name"),
                            "season": int(season), "rec": rec, "scoring": fmt_for_rec(rec), "slots": slots,
                            "teams": teams, "my_team": my, "opponents": opp, "week": per, "has_lineups": True,
+                           "scoring_custom": espn_scoring(items), "scoring_source": "ESPN",
                            "resync": {"type": "espn", "league_id": str(league_id), "season": int(season)}})
 
 
@@ -2409,7 +2539,9 @@ def yahoo_from_payload(S, p):
     mine = next((t for t in teams if t["id"] == my), None)
     slots = (slots_from_entries(mine["entries"]) if (mine and any_slots) else None) or dict(DEFAULT_SLOTS)
     nm = (p.get("name") or "").replace("Yahoo Fantasy Football", "").strip(" -|") or None
-    return _finish_league({"platform": "yahoo", "league_id": str(p.get("league")), "name": nm,
+    ysc = yahoo_scoring(p.get("sc"))
+    return _finish_league({"platform": "yahoo", "scoring_custom": ysc,
+                           "scoring_source": "Yahoo settings page" if ysc else None, "league_id": str(p.get("league")), "name": nm,
                            "season": S.season, "rec": 0.5, "scoring": "half", "slots": slots,
                            "teams": teams, "my_team": my, "opponents": {}, "week": None,
                            "has_lineups": any_slots, "slots_auto": any_slots, "resync": None,
@@ -2440,9 +2572,9 @@ def league_from_sync(S, payload):
     raise ValueError("Unknown sync source.")
 
 
-BOOKMARK_VERSION = 2
+BOOKMARK_VERSION = 3
 BOOKMARKLET_JS = r"""(async()=>{const SITE='__SITE__';
-const go=o=>{o.v=2;const b=btoa(unescape(encodeURIComponent(JSON.stringify(o)))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+const go=o=>{o.v=3;const b=btoa(unescape(encodeURIComponent(JSON.stringify(o)))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 try{navigator.clipboard.writeText(b)}catch(e){}
 const u=SITE+'/?sync='+b;if(u.length>60000){alert('Big league! The sync code was copied. Paste it on the site under Sync a league.');return}
 location.href=u};
@@ -2454,7 +2586,7 @@ const yr=q.get('seasonId')||new Date().getFullYear();
 const r=await fetch('https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/'+yr+'/segments/0/leagues/'+lid+'?view=mTeam&view=mRoster&view=mSettings&view=mMatchup',{credentials:'include'});
 if(!r.ok)return alert('ESPN returned '+r.status+'. Make sure you are logged in to ESPN.');
 const d=await r.json();const per=(d.status||{}).currentMatchupPeriod;const ss=d.settings||{};
-return go({src:'espn',league:lid,season:+yr,my:q.get('teamId'),data:{settings:{name:ss.name,rosterSettings:{lineupSlotCounts:(ss.rosterSettings||{}).lineupSlotCounts},scoringSettings:{scoringItems:((ss.scoringSettings||{}).scoringItems||[]).filter(i=>i.statId==53||i.statId==4).map(i=>({statId:i.statId,points:i.points}))}},
+return go({src:'espn',league:lid,season:+yr,my:q.get('teamId'),data:{settings:{name:ss.name,rosterSettings:{lineupSlotCounts:(ss.rosterSettings||{}).lineupSlotCounts},scoringSettings:{scoringItems:((ss.scoringSettings||{}).scoringItems||[]).map(i=>({statId:i.statId,points:i.points,pointsOverrides:i.pointsOverrides}))}},
 members:(d.members||[]).map(m=>({id:m.id,displayName:m.displayName})),status:{currentMatchupPeriod:per},
 schedule:(d.schedule||[]).filter(s=>s.matchupPeriodId==per).map(s=>({matchupPeriodId:s.matchupPeriodId,home:{teamId:(s.home||{}).teamId},away:{teamId:(s.away||{}).teamId}})),
 teams:(d.teams||[]).map(t=>({id:t.id,name:t.name,location:t.location,nickname:t.nickname,owners:t.owners,record:{overall:((t.record||{}).overall)||{}},roster:{entries:((t.roster||{}).entries||[]).map(e=>{const pl=((e.playerPoolEntry||{}).player)||{};return {playerId:e.playerId,lineupSlotId:e.lineupSlotId,playerPoolEntry:{player:{fullName:pl.fullName,defaultPositionId:pl.defaultPositionId,proTeamId:pl.proTeamId,injuryStatus:pl.injuryStatus}}}})}}))}})}
@@ -2475,7 +2607,8 @@ if(!pl.length){doc.querySelectorAll('a[href*="/nfl/players/"]').forEach(a=>{cons
 if(mm&&t.length>3&&!seen.has(mm[1])){seen.add(mm[1]);pl.push([mm[1],t])}})}
 if(pl.length)teams.push({id:id,name:names[id]||('Team '+id),players:pl})}
 if(!teams.length)return alert('Could not read the rosters. Make sure you are logged in to Yahoo.');
-return go({src:'yahoo',league:lid,name:((home.querySelector('title')||{}).textContent||'').split('|')[0].trim(),my:my,teams:teams})}
+let sc=[];try{const sd=await get('/f1/'+lid+'/settings');sd.querySelectorAll('tr').forEach(tr=>{const c=tr.querySelectorAll('td,th');if(c.length>=2){const a=c[0].textContent.trim(),b=c[1].textContent.trim();if(a&&b&&a.length<50&&b.length<60)sc.push([a,b])}});sc=sc.slice(0,200)}catch(e){}
+return go({src:'yahoo',league:lid,name:((home.querySelector('title')||{}).textContent||'').split('|')[0].trim(),my:my,teams:teams,sc:sc})}
 alert('Open your league on Yahoo, ESPN or Sleeper first, then tap this bookmark.')
 }catch(e){alert('Sync failed: '+e.message)}})();"""
 
@@ -2499,20 +2632,41 @@ def bookmarklet(site):
     return "javascript:" + js
 
 
-def bookmark_widget(site):
+def bookmark_page(bm):
+    return ("<!doctype html><html><head><meta charset='utf-8'><title>Sync to Fantasy Reports</title></head>"
+            "<body style='font-family:sans-serif;background:#0b1220;color:#e6edf3;padding:40px;text-align:center'>"
+            "<h2>Drag the gold button to your bookmarks bar</h2>"
+            "<p style='color:#8b98ad'>Bookmarks bar hidden? Press Ctrl+Shift+B (Cmd+Shift+B on Mac).</p>"
+            f"<p style='margin:30px'><a href=\"{html.escape(bm, quote=True)}\" style='display:inline-block;"
+            "padding:18px 28px;border-radius:14px;background:#f5b301;color:#111;font-weight:800;font-size:20px;"
+            "text-decoration:none'>⚡ Sync to Fantasy Reports</a></p>"
+            "<p style='color:#8b98ad'>Then open your league on Yahoo, ESPN or Sleeper and click the bookmark.</p>"
+            "</body></html>")
+
+
+def bookmark_widget(site, key="bm"):
     import streamlit.components.v1 as components
     bm = bookmarklet(site)
     components.html(
-        f"""<div style="font-family:sans-serif;display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+        f"""<div style="font-family:sans-serif;display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:4px 2px">
         <a href="{esc(bm)}" onclick="event.preventDefault();alert('Drag this button to your bookmarks bar instead of clicking it.');"
-           style="display:inline-block;padding:12px 18px;border-radius:12px;background:#f5b301;color:#111;font-weight:800;
-           text-decoration:none;font-size:15px;cursor:grab">⚡ Sync to Fantasy Reports</a>
-        <span style="color:#8b98ad;font-size:13px">⬅ Drag this onto your bookmarks bar</span></div>""",
-        height=64)
-    with st.expander("Can't drag it? Make the bookmark by hand"):
-        st.caption("Bookmark any page, edit the bookmark, name it 'Sync to Fantasy Reports', and paste this as the URL. "
-                   "On a phone: make the bookmark on your computer first and let your browser sync it.")
-        st.code(bm, language=None)
+           style="display:inline-block;padding:13px 20px;border-radius:12px;background:#f5b301;color:#111;font-weight:800;
+           text-decoration:none;font-size:15px;cursor:grab;box-shadow:0 4px 14px rgba(245,179,1,.35)">⚡ Sync to Fantasy Reports</a>
+        <span style="color:#8b98ad;font-size:13px">⬅ Drag this onto your bookmarks bar (Ctrl+Shift+B shows the bar)</span></div>""",
+        height=70)
+    H(f'<div class="fr-sub" style="margin:.3rem 0 .4rem"><b style="color:{TEXT}">Don\'t see a gold button, or it won\'t '
+      f'drag?</b> Use either backup:</div>')
+    c1, c2 = st.columns(2)
+    with c1:
+        st.download_button("⬇️ Download the bookmark page", bookmark_page(bm), file_name="sync-to-fantasy-reports.html",
+                           mime="text/html", key=f"{key}_dl", use_container_width=True)
+        st.caption("Open the downloaded file in Brave and drag the big gold button from there.")
+    with c2:
+        with st.expander("Or create it by hand"):
+            st.caption("1. Press Ctrl+D to bookmark any page. 2. Right-click the new bookmark → Edit. "
+                       "3. Name it 'Sync to Fantasy Reports' and replace the URL with everything below "
+                       "(use the copy icon in the corner).")
+            st.code(bm, language=None)
 
 
 # ------------------------------------------------------------------------------------
@@ -2533,12 +2687,21 @@ INJ_COLORS = {"Q": AMBER, "QUESTIONABLE": AMBER, "D": "#fb923c", "DOUBTFUL": "#f
               "IR": RED, "INJURY_RESERVE": RED, "PUP": RED, "SUSP": RED, "SUSPENSION": RED}
 
 
-def slot_pill(slot, small=False):
-    c = SLOT_COLORS.get(slot, "#3b4a63")
-    txt = SLOT_TEXT.get(slot, slot)
-    dark = slot in ("BN", "TAXI")
-    return (f'<span class="fr-slot{" sm" if small else ""}" style="background:{c}{"" if dark else "26"};'
-            f'color:{"#cbd5e1" if dark else c};border-color:{c}{"" if dark else "66"}">{txt}</span>')
+POS_COLORS = {"QB": "#f2557a", "RB": "#22c3a6", "WR": "#4ea3ff", "TE": "#ff9f43", "K": "#a3a3c2", "DEF": "#c08457"}
+
+
+def slot_pill(slot, pos=None):
+    """Starters: the slot they're in (QB, RB, WR, TE, FLEX, K, DEF), filled in their position's colour.
+    Bench/taxi: their position, outlined. IR: red."""
+    if slot == "IR":
+        return f'<span class="fr-slot" style="background:{RED}26;color:#fca5a5;border-color:{RED}88">IR</span>'
+    c = POS_COLORS.get(pos) or SLOT_COLORS.get(slot, "#64748b")
+    if slot in STARTING:
+        txt = SLOT_TEXT.get(slot, slot)
+        return f'<span class="fr-slot" style="background:{c}2e;color:{c};border-color:{c}99">{txt}</span>'
+    txt = pos or SLOT_TEXT.get(slot, slot)
+    return (f'<span class="fr-slot bn" style="color:{c};border-color:{c}66" title="On the bench">{esc(txt)}'
+            f'<i>{"TAXI" if slot == "TAXI" else "BN"}</i></span>')
 
 
 def inj_badge(status):
@@ -2593,15 +2756,16 @@ def kdef_hint(S, e, week):
 
 
 def pts_cell(S, e, p, week):
-    """Right-hand points column: FINAL if his game is over, otherwise PROJ."""
+    """Two numbers on every row: PROJ (projected this week) and FINAL (actual, once his game is over)."""
+    dash = '<b class="na">–</b>'
     if e.get("pos") in ("K", "DEF") or not e.get("gid"):
-        return '<div class="fr-pts"><span>PROJ</span><b style="color:#64748b">–</b></div>'
-    fin = game_result(S, e["gid"], week)
-    if fin is not None:
-        return f'<div class="fr-pts final"><span>FINAL</span><b>{fin:.1f}</b></div>'
-    if not p:
-        return '<div class="fr-pts"><span>PROJ</span><b style="color:#64748b">–</b></div>'
-    return f'<div class="fr-pts"><span>PROJ</span><b>{p["proj"]:.1f}</b></div>'
+        proj, fin = dash, dash
+    else:
+        proj = f'<b>{p["proj"]:.1f}</b>' if p else dash
+        f = game_result(S, e["gid"], week)
+        fin = f'<b class="fin">{f:.1f}</b>' if f is not None else dash
+    return (f'<div class="fr-pts2"><div><span>PROJ</span>{proj}</div>'
+            f'<div><span>FINAL</span>{fin}</div></div>')
 
 
 def player_line(S, e, p, week, badge=""):
@@ -2622,7 +2786,7 @@ def player_line(S, e, p, week, badge=""):
         if p and p["bye"]:
             extra = f' · <span style="color:{RED}">BYE</span>'
     st_ = e.get("status") or ((p or {}).get("inj_status") or "").split(" (")[0]
-    return (f'<div class="fr-pl{" ir" if slot == "IR" else ""}">{slot_pill(slot)}{logo(e.get("team"), 26)}'
+    return (f'<div class="fr-pl{" ir" if slot == "IR" else ""}">{slot_pill(slot, e.get("pos"))}{logo(e.get("team"), 26)}'
             f'<div class="fr-pl-main"><div class="fr-pl-name">{name}{inj_badge(st_)}{badge}</div>'
             f'<div class="fr-pl-meta">{meta}{extra}</div></div>{pts_cell(S, e, p, week)}</div>')
 
@@ -2766,16 +2930,39 @@ def lineup_compare(S, t, T, week, slots):
         [e for e in es if e.get("pos") in ("K", "DEF")][: (slots.get("K", 0) + slots.get("DEF", 0))]
     rec_ids = {r["gid"] for r in rec_rows if r.get("gid")}
     set_ids = {r["gid"] for r in set_rows if r.get("gid")}
-    left = "".join(player_line(S, e, projs.get(e.get("gid")), week,
-                               '<span class="fr-tag sit">SIT?</span>' if e.get("gid") in projs and
-                               e["gid"] not in rec_ids else "") for e in set_rows)
-    right = "".join(player_line(S, e, projs.get(e.get("gid")), week,
-                                '<span class="fr-tag start">NEW</span>' if has_slots and e.get("gid") and
-                                e["gid"] not in set_ids else "") for e in rec_rows)
-    cols = (f'<div class="fr-tc"><div class="fr-grp" style="padding:.7rem 1rem"><b>Your lineup (as set)</b>'
-            f'<span>{set_total:.1f} proj</span></div><div class="fr-tc-body">{left}</div></div>' if has_slots else "")
-    cols += (f'<div class="fr-tc" style="border-top:4px solid {GOLD}"><div class="fr-grp" style="padding:.7rem 1rem">'
-             f'<b>Recommended</b><span>{rec_total:.1f} proj</span></div><div class="fr-tc-body">{right}</div></div>')
+    def lines(rows, badge_fn=None):
+        return "".join(player_line(S, e, projs.get(e.get("gid")), week, badge_fn(e) if badge_fn else "") for e in rows)
+
+    def group(title, total=None):
+        return (f'<div class="fr-grp"><b>{title}</b>' + (f"<span>{total:.1f} proj</span>" if total is not None else "")
+                + "</div>")
+    ir_rows = ordered_entries(es, "ir")
+    if has_slots:
+        bench_rows = ordered_entries(es, "bench")
+        left = (group("Starters", set_total) +
+                lines(set_rows, lambda e: '<span class="fr-tag sit">SIT?</span>' if e.get("gid") in projs and
+                      e["gid"] not in rec_ids else "") +
+                (group("Bench") + lines(bench_rows, lambda e: '<span class="fr-tag start">START?</span>'
+                                        if e.get("gid") in rec_ids else "") if bench_rows else "") +
+                (group("Injured reserve") + lines(ir_rows) if ir_rows else ""))
+    rec_bench = [{**e, "slot": "TAXI" if e["slot"] == "TAXI" else "BN"} for e in es
+                 if e["slot"] not in ("IR",) and e.get("gid") not in rec_ids and e.get("pos") not in ("K", "DEF")]
+    rec_bench = ordered_entries(rec_bench, "bench")
+    right = (group("Starters", rec_total) +
+             lines(rec_rows, lambda e: '<span class="fr-tag start">NEW</span>' if has_slots and e.get("gid") and
+                   e["gid"] not in set_ids else "") +
+             (group("Bench") + lines(rec_bench) if rec_bench else "") +
+             (group("Injured reserve") + lines(ir_rows) if ir_rows else ""))
+    cols = (f'<div class="fr-tc" style="border-top:4px solid {BLUE}"><div class="fr-tc-head" style="background:'
+            f'linear-gradient(120deg,{BLUE}26,transparent 70%)"><div style="flex:1"><div class="fr-tc-name">'
+            f'Your lineup</div><div class="fr-tc-sub">as currently set on {esc(PLATFORM_LABEL.get(t.get("_platform"), "your site"))}'
+            f'</div></div><div class="fr-tc-tot"><div class="v">{set_total:.1f}</div><div class="l">wk {week} proj</div>'
+            f'</div></div><div class="fr-tc-body">{left}</div></div>' if has_slots else "")
+    cols += (f'<div class="fr-tc" style="border-top:4px solid {GOLD}"><div class="fr-tc-head" style="background:'
+             f'linear-gradient(120deg,{GOLD}26,transparent 70%)"><div style="flex:1"><div class="fr-tc-name">'
+             f'Recommended</div><div class="fr-tc-sub">highest projection at every slot</div></div>'
+             f'<div class="fr-tc-tot"><div class="v">{rec_total:.1f}</div><div class="l">wk {week} proj</div></div>'
+             f'</div><div class="fr-tc-body">{right}</div></div>')
     H(f'<div class="fr-grid g2">{cols}</div>')
     st.caption("PROJ = projected fantasy points this week; FINAL = his game is over and this is what he scored. "
                "Kickers and defenses aren't projected; their line shows the Vegas context instead (a defense wants "
@@ -2784,7 +2971,58 @@ def lineup_compare(S, t, T, week, slots):
 
 
 
+def effective_scoring(league):
+    sc = league.get("scoring_manual") or league.get("scoring_custom")
+    return clean_scoring(sc) if sc else None
+
+
+def league_settings_editor(store, owner, row, lg):
+    rid = row["id"]
+    cur = effective_scoring(lg) or clean_scoring(preset_scoring(lg.get("scoring", "half")))
+    st.markdown("**Scoring**")
+    src = "You edited this." if lg.get("scoring_manual") else \
+        (f"Synced from {lg['scoring_source']}." if lg.get("scoring_source") else "Not synced; please check it.")
+    st.caption(src + " Bonuses (100-yard games, long TDs) aren't modeled.")
+    presets = {"Current": cur, "Standard": clean_scoring(preset_scoring("standard")),
+               "Half-PPR": clean_scoring(preset_scoring("half")), "PPR": clean_scoring(preset_scoring("ppr")),
+               "Half-PPR, 6-pt pass TD": clean_scoring({**preset_scoring("half"), "pass_td": 6})}
+    pick = st.selectbox("Start from", list(presets), key=f"scp_{rid}")
+    base = presets[pick]
+    vals = {}
+    cols = st.columns(2)
+    for i, (k, lab, _) in enumerate(SCORING_FIELDS):
+        step = 0.01 if k.endswith("_yd") else 0.5
+        vals[k] = cols[i % 2].number_input(lab, value=float(base[k]), step=step, format="%.2f" if step < 0.5 else "%.1f",
+                                           key=f"sc_{k}_{rid}_{pick}")
+    st.markdown("**Starting lineup**")
+    sl = {**DEFAULT_SLOTS, **(lg.get("slots") or {})}
+    new_slots = dict(sl)
+    cols = st.columns(3)
+    for i, key in enumerate(["QB", "RB", "WR", "TE", "FLEX", "SUPERFLEX"]):
+        new_slots[key] = cols[i % 3].number_input(SLOT_LABEL.get(key, key), 0, 4, int(sl.get(key, 0)),
+                                                  key=f"sl_{key}_{rid}")
+    b1, b2 = st.columns(2)
+    if b1.button("Save settings", type="primary", key=f"scsave_{rid}", use_container_width=True):
+        new_sc = clean_scoring(vals)
+        if new_sc != clean_scoring(lg.get("scoring_custom") or {}) or lg.get("scoring_manual"):
+            lg["scoring_manual"] = new_sc
+        lg["slots"] = new_slots
+        store.save(owner, rid, lg)
+        list_teams.clear()
+        st.session_state._flash = "League settings saved."
+        st.rerun()
+    if lg.get("scoring_manual") and lg.get("scoring_custom"):
+        if b2.button("Use synced scoring", key=f"scclr_{rid}", use_container_width=True):
+            lg.pop("scoring_manual", None)
+            store.save(owner, rid, lg)
+            list_teams.clear()
+            st.rerun()
+
+
 def league_season(S, league, season):
+    sc = effective_scoring(league)
+    if sc:
+        return get_season(season, sc)
     fmt_ = league.get("scoring") or S.fmt_name
     return S if fmt_ == S.fmt_name else get_season(season, fmt_)
 
@@ -2920,8 +3158,11 @@ def save_league(store, owner, league, existing_teams):
                 str(d.get("league_id")) == str(league["league_id"]):
             if not league.get("my_team") and d.get("my_team"):
                 league["my_team"] = d["my_team"]
-            if league["platform"] == "yahoo":
-                league["scoring"], league["rec"] = d.get("scoring", league["scoring"]), d.get("rec", league["rec"])
+            if d.get("scoring_manual"):
+                league["scoring_manual"] = d["scoring_manual"]
+            if not league.get("scoring_custom") and d.get("scoring_custom"):
+                league["scoring_custom"], league["scoring_source"] = d["scoring_custom"], d.get("scoring_source")
+            if league["platform"] == "yahoo" and not league.get("slots_auto"):
                 league["slots"] = d.get("slots", league["slots"])
             return store.save(owner, t["id"], league)
     return store.save(owner, None, league)
@@ -3071,6 +3312,8 @@ def resync(S, store, owner, row):
     else:
         raise ValueError("Use the ⚡ bookmark on the league's website to re-sync this one.")
     new["my_team"] = new.get("my_team") or lg.get("my_team")
+    if lg.get("scoring_manual"):
+        new["scoring_manual"] = lg["scoring_manual"]
     store.save(owner, row["id"], new)
 
 
@@ -3079,13 +3322,18 @@ def render_league(S, store, owner, row, season):
     LS = league_season(S, lg, season)
     tnames = {t["id"]: t["name"] for t in lg["teams"]}
     synced = _parse_ts(lg.get("synced_at"))
-    synced_chip = f'<span class="fr-chip">Synced {synced.strftime("%b %d")}</span>' if synced else ""
+    eff_sc = effective_scoring(lg)
+    sc_src = "set by you" if lg.get("scoring_manual") else (f"from {lg['scoring_source']}" if lg.get("scoring_source")
+                                                             else "default, edit in League settings")
+    chips = [PLATFORM_LABEL.get(lg["platform"], ""), f'{lg["teams_in_league"]} teams']
+    if synced:
+        chips.append(f'Synced {synced.strftime("%b %d, %I:%M %p")}')
+    chip_html = "".join(f'<span class="fr-chip">{esc(c)}</span>' for c in chips)
+    sc_line = scoring_summary(eff_sc) if eff_sc else pr.FORMAT_LABEL[lg.get("scoring", "half")]
     H(f'<div class="fr-hero" style="background:linear-gradient(115deg,#2b1d4f 0%,{CARD} 100%);border-left:6px solid {GOLD}">'
-      f'<div><div class="nm">{esc(lg["name"])}</div><div>'
-      f'<span class="fr-chip">{PLATFORM_LABEL.get(lg["platform"], "")}</span>'
-      f'<span class="fr-chip">{lg["teams_in_league"]} teams</span>'
-      f'<span class="fr-chip">{pr.FORMAT_LABEL[lg.get("scoring", "half")].replace(" scoring", "")}</span>'
-      f'{synced_chip}</div></div></div>')
+      f'<div><div class="nm">{esc(lg["name"])}</div><div>{chip_html}</div>'
+      f'<div class="meta">Scoring: <b style="color:#fff">{esc(sc_line)}</b> <span style="opacity:.75">({esc(sc_src)})'
+      f'</span></div></div></div>')
     c1, c2, c3 = st.columns([2.2, 1, 1])
     ids = [t["id"] for t in lg["teams"]]
     cur = lg.get("my_team") if lg.get("my_team") in ids else None
@@ -3098,36 +3346,40 @@ def render_league(S, store, owner, row, season):
         list_teams.clear()
         st.rerun()
     c2.markdown('<div style="height:1.75rem"></div>', unsafe_allow_html=True)
-    if c2.button("🔄 Re-sync", use_container_width=True, help="Pull the latest rosters"):
-        try:
-            with st.spinner("Syncing..."):
-                resync(S, store, owner, row)
-            list_teams.clear()
-            st.session_state._flash = "League re-synced."
-            st.rerun()
-        except Exception as e:
-            st.error(str(e))
-    c3.markdown('<div style="height:1.75rem"></div>', unsafe_allow_html=True)
-    if lg["platform"] == "yahoo":
-        with c3.popover("⚙️ Settings", use_container_width=True):
-            st.caption("Yahoo doesn't share scoring and lineup settings through the bookmark. Set them here.")
-            sc = st.selectbox("Scoring", list(FORMATS), index=list(FORMATS.values()).index(lg.get("scoring", "half")),
-                              key=f"ysc_{row['id']}")
-            sl = {**DEFAULT_SLOTS, **(lg.get("slots") or {})}
-            new = {}
-            for key in ["QB", "RB", "WR", "TE", "FLEX", "SUPERFLEX"]:
-                new[key] = st.number_input(SLOT_LABEL.get(key, key), 0, 4, int(sl.get(key, 0)),
-                                           key=f"ysl_{key}_{row['id']}")
-            if st.button("Save settings", key=f"ysave_{row['id']}"):
-                lg["scoring"], lg["slots"] = FORMATS[sc], new
-                store.save(owner, row["id"], lg)
+    can_api = (lg.get("resync") or {}).get("type") in ("sleeper", "espn")
+    if can_api:
+        if c2.button("🔄 Re-sync", use_container_width=True, help="Pull the latest rosters, lineups and scoring"):
+            try:
+                with st.spinner("Syncing..."):
+                    resync(S, store, owner, row)
                 list_teams.clear()
+                st.session_state._flash = "League re-synced."
                 st.rerun()
+            except Exception as e:
+                st.error(str(e))
+    else:
+        if c2.button("⚡ Update from Yahoo" if lg["platform"] == "yahoo" else "⚡ Update", use_container_width=True,
+                     help="Shows the bookmark that re-syncs this league"):
+            st.session_state[f"_bm_open_{row['id']}"] = not st.session_state.get(f"_bm_open_{row['id']}", False)
+    c3.markdown('<div style="height:1.75rem"></div>', unsafe_allow_html=True)
+    with c3.popover("⚙️ League settings", use_container_width=True):
+        league_settings_editor(store, owner, row, lg)
+    outdated = lg["platform"] == "yahoo" and lg.get("bookmark_version", 1) < BOOKMARK_VERSION
+    if not can_api and (st.session_state.get(f"_bm_open_{row['id']}") or outdated):
+        site = site_url()
+        H(f'<div class="fr-card" style="border-left:5px solid {GOLD};margin:.3rem 0 .6rem">'
+          f'<div class="fr-cardh" style="color:{GOLD}">Update this league</div><div class="fr-sub">'
+          + ("This league was synced with an older bookmark, so it's missing your set lineup, kickers, defenses, "
+             "IR and scoring. Add the new bookmark below (and delete the old one), open your league on Yahoo, "
+             "and click it." if outdated else
+             "Open your league on Yahoo (logged in) and click this bookmark. It updates this same league.")
+          + '</div></div>')
+        if site:
+            bookmark_widget(site, key=f"bm_{row['id']}")
     if not pick:
         st.info("Pick your team above to see your lineup, matchup, trade partners and waiver targets.")
     with st.spinner("Analyzing the league..."):
-        R = league_report(LS, skey(LS, row["id"], lg.get("synced_at"), pick, str(lg.get("slots")),
-                                   lg.get("scoring")), lg)
+        R = league_report(LS, skey(LS, row["id"], lg.get("synced_at"), pick, str(lg.get("slots"))), lg)
     week = R["week"]
     tabs = st.tabs(["📋 My team", "🆚 Matchup", "🏆 Power rankings", "🔁 Trade partners", "🧲 Waiver wire",
                     "👥 All rosters"])
@@ -3135,12 +3387,10 @@ def render_league(S, store, owner, row, season):
     with tabs[0]:
         if pick and R.get("mine"):
             me = next(t for t in lg["teams"] if t["id"] == pick)
-            if lg.get("platform") == "yahoo" and lg.get("bookmark_version", 1) < BOOKMARK_VERSION:
-                H(notes_html([("info", "Update your ⚡ bookmark (Sync a league → Yahoo tab, drag the new button) and "
-                                       "sync again to see your set lineup, kickers, defenses and IR here.")]))
             render_team(LS, {"name": tnames[pick], "roster": me["players"], "scoring": lg.get("scoring", "half")},
                         R["mine"], show_header=False,
-                        lineup_fn=lambda: lineup_compare(LS, me, R["teams"][pick], week, slots_all))
+                        lineup_fn=lambda: lineup_compare(LS, {**me, "_platform": lg.get("platform")},
+                                                         R["teams"][pick], week, slots_all))
         else:
             st.caption("Pick your team above.")
     with tabs[1]:
