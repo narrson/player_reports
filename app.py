@@ -338,6 +338,10 @@ def logo(team, size=20, style=""):
 GLOSSARY = {
     "PPG": "Fantasy points per game.",
     "Total pts": "Fantasy points for the whole season.",
+    "Proj/G": "The model's rest-of-season points per game: usage (expected points) first, last season as a prior "
+              "early on, efficiency mostly regressed, touchdown luck removed, and remaining schedule.",
+    "Signal": "Trade-market call from the model: Buy low (scoring under his role), Sell high (scoring over it), "
+              "Buy high (good and role growing), Sell low (role shrinking).",
     "xFP": "Expected fantasy points: what an average player would score with the same targets, carries, "
            "depth of target and field position. The most stable measure of opportunity.",
     "+/- exp": "Points over expected per game: actual points minus xFP. Positive = scoring more than his usage predicts.",
@@ -423,7 +427,7 @@ def styled_df(df, row_bg=None, cell=None, height=None, **kw):
 # Data (cached on the server, shared by every visit)
 # ------------------------------------------------------------------------------------
 
-DATA_VERSION = 7  # bump whenever player_report.py changes what a Season holds, so stale cached data is dropped
+DATA_VERSION = 8  # bump whenever player_report.py changes what a Season holds, so stale cached data is dropped
 
 
 def preset_scoring(fmt_name):
@@ -479,25 +483,26 @@ def get_player_list(_S, key):
 
 
 @st.cache_resource(ttl=pr.CACHE_HOURS * 3600, max_entries=4, show_spinner=False)
+def get_backtest(_S, key):
+    return pr.backtest(_S)
+
+
+@st.cache_resource(ttl=pr.CACHE_HOURS * 3600, max_entries=4, show_spinner=False)
 def get_home(_S, key):
     S = _S
-    out = {"luck": [], "trend": [], "week_top": {}, "season_top": {}, "matchups": {}, "next_week": None}
+    out = {"market": [], "trend": [], "week_top": {}, "season_top": {}, "matchups": {}, "next_week": None}
     for pos in pr.FANTASY_POS:
         pool, _ = pr.position_pool(S, pos)
-        for pid, m in pool.items():
-            t = S.season_tot[pid]
-            base = {"pid": pid, "name": t["name"], "pos": pos, "team": t["team"], "ppg": m["ppg"]}
-            if m.get("regress_pg") is not None and (m.get("xfp_pg") or 0) >= 7 and m.get("xfp_games", 0) >= 4:
-                out["luck"].append({**base, "val": m["regress_pg"], "td_oe": m["td_oe_pg"], "xfp": m["xfp_pg"],
-                                    "act_td": m["act_td_xweeks"] + (m["act_pass_td_xweeks"] if pos == "QB" else 0),
-                                    "exp_td": (m["exp_td"] or 0) + ((m["exp_pass_td"] or 0) if pos == "QB" else 0)})
-            weeks = pr.player_weeks(S, pid)
-            if len(weeks) >= 4 and m.get("xfp_pg") is not None:
-                l3 = pr.player_metrics(S, pid, pos, weeks[-3:])
-                if l3.get("xfp_pg") is not None:
-                    out["trend"].append({**base, "val": l3["xfp_pg"] - m["xfp_pg"], "l3": l3["xfp_pg"],
-                                         "season": m["xfp_pg"]})
-        out["week_top"][pos] = sorted([r for rs in S.weekly.values() for r in rs
+        for pid in pool:
+            mv = pr.market_view(S, pid)
+            if not mv:
+                continue
+            out["market"].append(mv)
+            rs = mv["role"]
+            if rs and (rs["flag"] or abs(rs["z"]) >= 1.6) and abs(rs["delta"]) >= 1.5:
+                out["trend"].append({**mv, "val": rs["delta"], "l3": rs["recent"], "season": rs["before"],
+                                     "z": rs["z"], "parts": rs["parts"], "confirmed": rs["flag"]})
+        out["week_top"][pos] = sorted([r for rs_ in S.weekly.values() for r in rs_
                                        if r["week"] == S.last_week and r["pos"] == pos], key=lambda r: -r["pts"])[:5]
         out["season_top"][pos] = sorted([(pid, t) for pid, t in S.season_tot.items() if t["pos"] == pos],
                                         key=lambda x: -x[1]["pts"])[:5]
@@ -512,7 +517,8 @@ def get_home(_S, key):
                 for off, de in ((gm["home"], gm["away"]), (gm["away"], gm["home"])):
                     f = S.fpa.get((de, pos))
                     if f:
-                        lst.append({"off": off, "def": de, "rank": f["rank"], "n": f["n"], "avg": f["avg"]})
+                        lst.append({"off": off, "def": de, "rank": f["rank"], "n": f["n"], "avg": f["avg"],
+                                    "adj": f.get("adj")})
             out["matchups"][pos] = sorted(lst, key=lambda x: x["rank"])[:5]
     return out
 
@@ -1296,39 +1302,61 @@ def page_home(S):
         H(f'<div class="fr-sub" style="margin-top:.4rem">Number = where that defense ranks in points allowed to the '
           f'position (1st = most allowed).</div>')
 
-    # 4. Usage trends
+    # 4. Role changes (usage rising / falling)
     tr = d["trend"]
-    rising = sorted([x for x in tr if x["val"] > 0], key=lambda x: -x["val"])[:6]
-    falling = sorted([x for x in tr if x["val"] < 0], key=lambda x: x["val"])[:6]
+    rising = sorted([x for x in tr if x["val"] > 0], key=lambda x: (-x["confirmed"], -x["val"]))[:6]
+    falling = sorted([x for x in tr if x["val"] < 0], key=lambda x: (-x["confirmed"], x["val"]))[:6]
 
-    def sub_tr(x):
-        return f"{x['pos']} · {x['team']} · {x['l3']:.1f} xFP last 3 vs {x['season']:.1f} season"
-    sec("Usage trends (role changes show up here first)")
+    def parts_txt(x):
+        bits = []
+        p_ = x["parts"]
+        if p_.get("snap") is not None and abs(p_["snap"]) >= 5:
+            bits.append(f"snaps {p_['snap']:+.0f}")
+        if p_.get("route") is not None and abs(p_["route"]) >= 5:
+            bits.append(f"routes {p_['route']:+.0f}")
+        if p_.get("share") is not None and abs(p_["share"]) >= 3 and x["pos"] != "QB":
+            bits.append(f"share {p_['share']:+.0f}")
+        return f"{x['pos']} · {x['team']} · {x['l3']:.1f} xFP last 3 vs {x['season']:.1f}" + \
+            (f" · {', '.join(bits)}" if bits else "")
+    sec("Role changes (usage that's really moving, not noise)")
     H('<div class="fr-grid g2">' + "".join([
-        list_card("Usage rising", "Expected points from his usage, last 3 games vs season", BLUE,
-                  [list_item(x["pid"], x["name"], sub_tr(x), f"▲ {x['val']:.1f}", BLUE, x["team"]) for x in rising]),
-        list_card("Usage falling", "Expected points from his usage, last 3 games vs season", AMBER,
-                  [list_item(x["pid"], x["name"], sub_tr(x), f"▼ {abs(x['val']):.1f}", AMBER, x["team"])
-                   for x in falling]),
+        list_card("Usage rising", "Expected points up beyond normal week-to-week swings", BLUE,
+                  [list_item(x["pid"], x["name"], parts_txt(x), ("▲ " if x["confirmed"] else "△ ") + f"{x['val']:.1f}",
+                             BLUE, x["team"]) for x in rising]),
+        list_card("Usage falling", "Expected points down beyond normal week-to-week swings", AMBER,
+                  [list_item(x["pid"], x["name"], parts_txt(x), ("▼ " if x["confirmed"] else "▽ ") +
+                             f"{abs(x['val']):.1f}", AMBER, x["team"]) for x in falling]),
     ]) + "</div>")
+    H('<div class="fr-sub" style="margin-top:.4rem">▲/▼ = confirmed role change (snaps, routes or share moved with it); '
+      '△/▽ = notable but not yet confirmed.</div>')
 
-    # 5. TD luck: buy low / sell high
-    lk = d["luck"]
-    buy = sorted([x for x in lk if x["val"] <= -1.0], key=lambda x: x["val"])[:6]
-    sell = sorted([x for x in lk if x["val"] >= 1.5], key=lambda x: -x["val"])[:6]
+    # 5. Trade market: model vs production
+    mk = d["market"]
 
-    def sub_lk(x):
-        return f"{x['pos']} · {x['team']} · {int(x['act_td'])} TDs on {x['exp_td']:.1f} expected"
-    sec("Buy low / sell high (touchdown luck)")
+    def q(tag, key, rev):
+        return sorted([x for x in mk if tag in x["tags"]], key=lambda x: x[key], reverse=rev)[:6]
+
+    def sub_mk(x):
+        why = " · ".join(x["why"][:2])
+        return f"{x['pos']} · {x['team']} · model {x['ros_rate']:.1f}/g vs {x['ppg']:.1f} so far" + (f" · {why}" if why else "")
+    sec("Trade market (what the model expects vs what he's scored)")
     H('<div class="fr-grid g2">' + "".join([
-        list_card("Buy low", "Scoring fewer TDs than his usage predicts. Expect more.", GREEN,
-                  [list_item(x["pid"], x["name"], sub_lk(x), f"{x['val']:+.1f}", GREEN, x["team"]) for x in buy]),
-        list_card("Sell high", "Scoring more TDs than his usage predicts. Expect fewer.", RED,
-                  [list_item(x["pid"], x["name"], sub_lk(x), f"{x['val']:+.1f}", RED, x["team"]) for x in sell]),
+        list_card("Buy low", "Underperforming what his role should produce. Expect more.", GREEN,
+                  [list_item(x["pid"], x["name"], sub_mk(x), f"{x['gap']:+.1f}", GREEN, x["team"])
+                   for x in q("buy_low", "gap", True)]),
+        list_card("Sell high", "Outscoring his role (TD luck, unsustainable efficiency). Expect less.", RED,
+                  [list_item(x["pid"], x["name"], sub_mk(x), f"{x['gap']:+.1f}", RED, x["team"])
+                   for x in q("sell_high", "gap", False)]),
+        list_card("Buy high", "Already good, and his role is growing. Worth paying full price.", BLUE,
+                  [list_item(x["pid"], x["name"], sub_mk(x), f"▲ {x['role']['delta']:.1f}", BLUE, x["team"])
+                   for x in sorted([x for x in mk if "buy_high" in x["tags"]], key=lambda x: -x["role"]["delta"])[:6]]),
+        list_card("Sell low", "Role is shrinking. Move on before his value drops further.", AMBER,
+                  [list_item(x["pid"], x["name"], sub_mk(x), f"▼ {abs(x['role']['delta']):.1f}", AMBER, x["team"])
+                   for x in sorted([x for x in mk if "sell_low" in x["tags"]], key=lambda x: x["role"]["delta"])[:6]]),
     ]) + "</div>")
-    H('<div class="fr-sub" style="margin-top:.4rem">Number = points per game likely to come back (buy) or fade (sell): '
-      'TD luck plus a small share of efficiency. Players who simply beat their usage through skill (catch rate, '
-      'yards after catch) are not listed here. Includes players averaging 7+ expected points over 4+ games.</div>')
+    H('<div class="fr-sub" style="margin-top:.4rem">Model = rest-of-season points per game from usage (the stable '
+      'signal), last season as a prior, efficiency mostly regressed, touchdown luck removed, and remaining '
+      'schedule. Number = model minus production, compared with the position\'s typical gap.</div>')
     glossary(["xFP", "TD luck", "+/- exp", "PPG", "Defense rank"])
 
 
@@ -1348,7 +1376,8 @@ RANK_COLS = {
            ("Sack %", "p_sack_rate", 100), ("INT %", "p_int_rate", 100)],
 }
 RANK_COLS["TE"] = RANK_COLS["WR"]
-RANK_BY = {"Total points": "Total pts", "Points per game": "PPG", "Expected points": "xFP/G"}
+RANK_BY = {"Projection": "Proj/G", "Total points": "Total pts", "Points per game": "PPG", "Expected points": "xFP/G"}
+SIGNAL_LABEL = {"buy_low": "Buy low", "sell_high": "Sell high", "buy_high": "Buy high", "sell_low": "Sell low"}
 
 
 def segmented(label, options, key, default, fmt_fn=None):
@@ -1373,14 +1402,19 @@ def page_rankings(S):
     with c1:
         pos = segmented("Position", list(pr.FANTASY_POS), "rank_pos", "WR")
     with c2:
-        by = segmented("Rank by", list(RANK_BY), "rank_by", "Total points", lambda o: f"Rank by {o.lower()}")
+        by = segmented("Rank by", list(RANK_BY), "rank_by", "Projection", lambda o: f"Rank by {o.lower()}")
     with st.spinner("Ranking players..."):
         pool, _ = pr.position_pool(S, pos)
     rows = []
     for pid, m in pool.items():
         t = S.season_tot.get(pid, {})
+        mv = pr.market_view(S, pid)
+        b = pr.player_base(S, pid)
         r = {"pid": pid, "Logo": logo_url(t.get("team")), "Player": t.get("name"), "Team": t.get("team"),
-             "Games": m["games"], "Total pts": t.get("pts"), "PPG": m.get("ppg"), "xFP/G": m.get("xfp_pg"),
+             "Games": m["games"],
+             "Proj/G": (mv["ros_rate"] if mv else (b["base"] if b else None)),
+             "Signal": " · ".join(SIGNAL_LABEL[x] for x in (mv or {}).get("tags", [])),
+             "Total pts": t.get("pts"), "PPG": m.get("ppg"), "xFP/G": m.get("xfp_pg"),
              "+/- exp": m.get("fpoe_pg"), "TD luck/G": m.get("td_oe_pg"), "Snap %": m.get("snap_pct")}
         for lab, key, mult in RANK_COLS[pos]:
             v = m.get(key)
@@ -1400,6 +1434,9 @@ def page_rankings(S):
     cfg = {"pid": None, "Rank": st.column_config.NumberColumn("Rank", width="small"),
            "Logo": st.column_config.ImageColumn(" ", width="small"),
            "Total pts": st.column_config.NumberColumn(format="%.1f"),
+           "Proj/G": st.column_config.NumberColumn(format="%.1f", help="Model's rest-of-season points per game "
+                                                                       "(usage-driven, schedule-adjusted)"),
+           "Signal": st.column_config.TextColumn(help="Buy low / Sell high / Buy high / Sell low from the trade model"),
            "PPG": st.column_config.NumberColumn(format="%.1f"), "xFP/G": st.column_config.NumberColumn(format="%.1f"),
            "+/- exp": st.column_config.NumberColumn(format="%+.1f", help="Points over expected per game"),
            "TD luck/G": st.column_config.NumberColumn(format="%+.1f", help="Points per game from TD luck"),
@@ -1410,6 +1447,8 @@ def page_rankings(S):
     sty = smap(sty, lambda v: (f"color: {GREEN}" if v >= 1 else f"color: {RED}" if v <= -1 else "")
                if pd.notna(v) else "", ["+/- exp", "TD luck/G"])
     sty = smap(sty, lambda v: "font-weight: 800", [sort_col])
+    sig_col = {"Buy low": GREEN, "Sell high": RED, "Buy high": BLUE, "Sell low": AMBER}
+    sty = smap(sty, lambda v: (f"color: {sig_col.get(str(v).split(' · ')[0])}; font-weight: 700" if v else ""), ["Signal"])
     try:
         ev = st.dataframe(sty, use_container_width=True, hide_index=True, column_config=cfg, height=640,
                           on_select="rerun", selection_mode="single-row", key=f"rank_table_{pos}_{by}")
@@ -1417,7 +1456,10 @@ def page_rankings(S):
     except TypeError:
         st.dataframe(sty, use_container_width=True, hide_index=True, column_config=cfg, height=640)
         sel = []
-    note = {"Total points": "Total points rewards availability, like your league's standings.",
+    note = {"Projection": "Projection ranks by the model's rest-of-season points per game: usage first, last season "
+                          "as a prior, efficiency regressed, TD luck removed, schedule included. The best guide for "
+                          "who will score the most from here.",
+            "Total points": "Total points rewards availability, like your league's standings.",
             "Points per game": "Points per game ignores missed games, so players with fewer games can rank high.",
             "Expected points": "Expected points ranks by usage alone, the most stable predictor of future scoring."}[by]
     st.caption(f"{len(df)} {pos}s with {S.min_games}+ games and real volume. {note} "
@@ -1425,7 +1467,34 @@ def page_rankings(S):
     if sel:
         st.session_state.pending = {"player": df.iloc[sel[0]]["pid"], "view": "Player"}
         st.rerun()
-    glossary(["Total pts", "PPG", "xFP", "+/- exp", "TD luck", "Snap %"] + POS_TERMS[pos])
+    with st.expander("📏 How accurate is the projection model? (tested on this season)"):
+        st.caption("For every week this season, each player is projected using only the games before it, then checked "
+                   "against what he actually scored over his next 3 games. Compared with the two simple methods most "
+                   "rankings use. Lower error and higher correlation are better.")
+        if st.button("Run the accuracy check", key="bt_run"):
+            st.session_state["_bt_on"] = True
+        if st.session_state.get("_bt_on"):
+            with st.spinner("Re-projecting every week of the season..."):
+                bt = get_backtest(S, skey(S))
+            if not bt:
+                st.info("Not enough games played yet to test.")
+            else:
+                rows = []
+                for lab, d in bt["by_pos"].items():
+                    best = min(("model", "ppg", "last3"), key=lambda k: d[k]["mae"])
+                    imp = (1 - d["model"]["mae"] / d["ppg"]["mae"]) * 100 if d["ppg"]["mae"] else 0
+                    rows.append({"Group": lab, "Tests": d["n"],
+                                 "Model error": round(d["model"]["mae"], 2), "PPG-so-far error": round(d["ppg"]["mae"], 2),
+                                 "Last-3 error": round(d["last3"]["mae"], 2),
+                                 "Model vs PPG": f"{imp:+.0f}%",
+                                 "Model corr": round(d["model"]["corr"], 3), "PPG corr": round(d["ppg"]["corr"], 3),
+                                 "Most accurate": {"model": "Model", "ppg": "PPG so far", "last3": "Last 3"}[best]})
+                styled_df(pd.DataFrame(rows), cell={"Most accurate": lambda v: GREEN if v == "Model" else AMBER,
+                                                    "Model vs PPG": lambda v: GREEN if str(v).startswith("+") else RED})
+                st.caption("Error = average miss in fantasy points per game over the next 3 games. Model vs PPG = how "
+                           "much smaller the model's error is. Rest-of-season matchups and injuries are left out here so "
+                           "the comparison is apples to apples.")
+    glossary(["Proj/G", "Signal", "Total pts", "PPG", "xFP", "+/- exp", "TD luck", "Snap %"] + POS_TERMS[pos])
 
 
 def page_defense(S):
@@ -3574,39 +3643,146 @@ def league_report(_S, key, _league):
     return out
 
 
-def trade_partners(S, league, R, my):
-    mine = R["teams"][my]
-    names = {t["id"]: t["name"] for t in league["teams"]}
-    chips = {}
-    for pos, lst in mine["surplus"].items():
-        for b in lst:
-            chips[b["pid"]] = (b, "extra depth")
-    for x in (R.get("mine") or {}).get("sell", []):
-        if x["pid"] not in {l["p"]["pid"] for l in mine["lineup"] if l["p"]} or \
-                sum(1 for b in mine["bench"] if b["pos"] == x["p"]["pos"] and b["proj"] > 0):
-            chips.setdefault(x["pid"], (x["p"], "sell-high (TD luck)"))
-    ideas = []
-    for tid, T in R["teams"].items():
-        if tid == my:
+def ros_rate(S, pid):
+    """Rest-of-season points per game (model rate x remaining schedule); 0 for players out long-term."""
+    cache = S.__dict__.setdefault("_rosr", {})
+    if pid not in cache:
+        b = pr.player_base(S, pid)
+        if not b:
+            cache[pid] = None
+        else:
+            inj = pr.current_status(S, pid)
+            long_out = bool(inj and any(w in str(inj.get("status", "")).lower() for w in ("injured reserve", "pup")))
+            cache[pid] = 0.0 if long_out else b["base"] * pr.schedule_factor(S, pid)
+    return cache[pid]
+
+
+def lineup_pg(players, slots):
+    """Best starting lineup's points per game from (pid, pos, rate) tuples (skill positions only)."""
+    avail = sorted([p for p in players if p[2] is not None], key=lambda p: -p[2])
+    used, tot = set(), 0.0
+    order = [s_ for s_ in ["QB", "RB", "WR", "TE"] for _ in range(int(slots.get(s_, 0) or 0))] + \
+            [s_ for s_ in ["FLEX", "SUPERFLEX"] for _ in range(int(slots.get(s_, 0) or 0))]
+    for slot in order:
+        for p in avail:
+            if p[0] not in used and p[1] in SLOT_ELIG[slot]:
+                used.add(p[0])
+                tot += p[2]
+                break
+    return tot
+
+
+def remaining_weeks(S):
+    nw = pr.next_week(S)
+    return max(0, pr.FANTASY_PLAYOFF_WEEKS[-1] - nw + 1) if nw else 0
+
+
+def roster_rates(S, keys):
+    out = []
+    for k in keys:
+        r = ros_rate(S, k)
+        p = S.season_tot.get(k) or S.players.get(k) or {}
+        if r is not None and p.get("pos") in pr.FANTASY_POS:
+            out.append((k, p.get("pos"), r))
+    return out
+
+
+def evaluate_trade(S, slots, mine, theirs, give, get, waiver=None):
+    """Change in each team's best lineup (points per game, rest of season) from swapping give <-> get.
+    Rosters stay the same size: a team taking on extra players drops its least valuable one(s); a team that
+    frees a spot picks up the best free agent that helps its lineup (waiver = {pos: rate})."""
+    my_before, th_before = lineup_pg(mine, slots), lineup_pg(theirs, slots)
+    gset, rset = set(give), set(get)
+    my_after = [p for p in mine if p[0] not in gset] + [p for p in theirs if p[0] in rset]
+    th_after = [p for p in theirs if p[0] not in rset] + [p for p in mine if p[0] in gset]
+
+    def fit(after, size):
+        after = sorted(after, key=lambda p: -p[2])
+        while len(after) > size:                      # drop the least valuable player(s)
+            after.pop()
+        while len(after) < size and waiver:          # fill open spots from waivers
+            best = max(((pos, r) for pos, r in waiver.items()),
+                       key=lambda pr_: lineup_pg(after + [("FA_" + pr_[0], pr_[0], pr_[1])], slots))
+            after.append(("FA_" + best[0], best[0], best[1]))
+            if len(after) < size and lineup_pg(after, slots) == lineup_pg(after[:-1], slots):
+                break
+        return after
+    my_after, th_after = fit(my_after, len(mine)), fit(th_after, len(theirs))
+    return lineup_pg(my_after, slots) - my_before, lineup_pg(th_after, slots) - th_before
+
+
+def waiver_rates(S, owned):
+    """Best free agent's rest-of-season rate at each position (what an open roster spot is worth)."""
+    best = {}
+    for pid, t in S.season_tot.items():
+        if pid in owned or t["pos"] not in pr.FANTASY_POS or t["games"] < 2:
             continue
-        for need in mine["needs"]:
-            for theirs in T["surplus"].get(need, []):
-                for pid, (mp, why) in chips.items():
-                    if mp["pos"] not in T["needs"] or mp["pos"] == need:
+        r = ros_rate(S, pid)
+        if r is not None and r > best.get(t["pos"], 0):
+            best[t["pos"]] = r
+    return best
+
+
+def trade_partners(S, league, R, my):
+    slots = {**DEFAULT_SLOTS, **(league.get("slots") or {})}
+    names = {t["id"]: t["name"] for t in league["teams"]}
+    rost = {t["id"]: roster_rates(S, team_keys(S, t)[0]) for t in league["teams"]}
+    mine = rost.get(my, [])
+    weeks = remaining_weeks(S)
+    owned = {p[0] for r in rost.values() for p in r}
+    wv = waiver_rates(S, owned)
+    ideas = []
+    for tid, theirs in rost.items():
+        if tid == my or not theirs:
+            continue
+        # 1-for-1
+        for a in mine:
+            for b in theirs:
+                mg, tg = evaluate_trade(S, slots, mine, theirs, [a[0]], [b[0]], wv)
+                if mg > 0.4 and tg > -0.5:
+                    ideas.append({"team": names[tid], "tid": tid, "give": [a], "get": [b], "mg": mg, "tg": tg})
+        # 2-for-1 consolidation: two of mine for one of their better players
+        mine_sorted = sorted(mine, key=lambda p: -p[2])[:10]
+        for i in range(len(mine_sorted)):
+            for j in range(i + 1, len(mine_sorted)):
+                pair = [mine_sorted[i], mine_sorted[j]]
+                for b in theirs:
+                    if b[2] <= max(pair[0][2], pair[1][2]):
                         continue
-                    a, b = mine["ros"].get(pid) or 0, T["ros"].get(theirs["pid"]) or 0
-                    if a and b and 0.8 <= b / a <= 1.25:
-                        ideas.append({"team": names[tid], "give": mp, "give_why": why, "give_ros": a,
-                                      "get": theirs, "get_ros": b, "fit": f"they need {mp['pos']}, you need {need}",
-                                      "score": min(a, b)})
-    ideas.sort(key=lambda x: -x["score"])
-    seen, out = set(), []
+                    mg, tg = evaluate_trade(S, slots, mine, theirs, [pair[0][0], pair[1][0]], [b[0]], wv)
+                    if mg > 0.6 and tg > -0.5:
+                        ideas.append({"team": names[tid], "tid": tid, "give": pair, "get": [b], "mg": mg, "tg": tg})
+    def market(k):  # what most managers go by: points per game so far
+        t = S.season_tot.get(k)
+        return t["ppg"] if t else (ros_rate(S, k) or 0)
+    kept = []
     for i in ideas:
-        k = (i["give"]["pid"], i["get"]["pid"])
-        if k not in seen:
-            seen.add(k)
-            out.append(i)
-    return out[:8]
+        their_in = sum(market(p[0]) for p in i["give"])    # what they receive, as they see it
+        their_out = sum(market(p[0]) for p in i["get"])
+        ratio = their_in / their_out if their_out > 0 else 2.0
+        if len(i["give"]) > 1:
+            ratio = (max(market(p[0]) for p in i["give"]) + 0.35 * min(market(p[0]) for p in i["give"])) / \
+                (their_out or 1)  # two lesser players are worth less than their sum to the other manager
+        i["their_ratio"], i["their_in"], i["their_out"] = ratio, their_in, their_out
+        accept = ratio >= 0.95 and (i["tg"] >= -0.3 or ratio >= 1.1)
+        if not accept:
+            continue
+        i["score"] = (i["mg"] + 0.4 * max(min(i["tg"], 2.0), -0.5) + 1.5 * min(ratio - 1, 0.3)
+                      - (0.3 if len(i["give"]) > 1 else 0.0))
+        i["ros_gain"] = i["mg"] * weeks
+        i["fit"] = ("win-win" if i["tg"] > 0.2 else "sells itself" if ratio >= 1.08 else "fair")
+        kept.append(i)
+    ideas = sorted(kept, key=lambda x: -x["score"])
+    out, used = [], set()
+    for i in ideas:
+        k = (tuple(p[0] for p in i["give"]), i["get"][0][0])
+        if k in used or any(p[0] in {q[0] for o in out for q in o["get"]} for p in i["get"]):
+            continue
+        used.add(k)
+        out.append(i)
+        if len(out) >= 8:
+            break
+    return out
 
 
 def waiver_targets(S, league, R, my):
@@ -3891,7 +4067,7 @@ def render_league(S, store, owner, row, season):
     with st.spinner("Analyzing the league..."):
         R = league_report(LS, skey(LS, row["id"], lg.get("synced_at"), pick, str(lg.get("slots"))), lg)
     week = R["week"]
-    tabs = st.tabs(["📋 My team", "🆚 Matchup", "🏆 Power rankings", "🔁 Trade partners", "🧲 Waiver wire",
+    tabs = st.tabs(["📋 My team", "🆚 Matchup", "🏆 Power rankings", "🔁 Trades", "🧲 Waiver wire",
                     "👥 All rosters"])
     slots_all = {**DEFAULT_SLOTS, **(lg.get("slots") or {})}
     with tabs[0]:
@@ -3911,32 +4087,7 @@ def render_league(S, store, owner, row, season):
         if not pick:
             st.caption("Pick your team above.")
         else:
-            P = R.get("partners") or []
-            needs = R["teams"][pick]["needs"]
-            H(notes_html([("down", f"Your weakest spots: {', '.join(needs)}.")] if needs else
-                         [("up", "Every starting spot is at or above an average starter in this league.")]))
-            if P:
-                sec("Teams that fit a trade")
-                items = []
-                for t in P:
-                    items.append(
-                        f'<div class="fr-card" style="margin-bottom:.5rem"><div class="fr-cardh" style="color:{BLUE}">'
-                        f'With {esc(t["team"])} · {esc(t["fit"])}</div><div style="display:flex;flex-wrap:wrap;gap:.8rem;'
-                        f'align-items:center;justify-content:space-between">'
-                        f'<div><div class="fr-cardh" style="color:{RED}">You give</div>{logo(t["give"]["team"], 22)} '
-                        f'{plink(t["give"]["pid"], t["give"]["name"])}<div class="sm" style="color:{MUTED};'
-                        f'font-size:.76rem">{t["give"]["pos"]} · {esc(t["give_why"])} · {t["give_ros"]:.0f} ROS pts</div></div>'
-                        f'<div style="font-size:1.4rem;color:{MUTED}">⇄</div>'
-                        f'<div><div class="fr-cardh" style="color:{GREEN}">You get</div>{logo(t["get"]["team"], 22)} '
-                        f'{plink(t["get"]["pid"], t["get"]["name"])}<div class="sm" style="color:{MUTED};'
-                        f'font-size:.76rem">{t["get"]["pos"]} · their extra depth · {t["get_ros"]:.0f} ROS pts</div>'
-                        f'</div></div></div>')
-                H('<div class="fr-list">' + "".join(items) + "</div>")
-                st.caption("Matches teams that have extra depth where you're weak and are weak where you have extra "
-                           "depth, at similar rest-of-season value. That's the kind of trade both sides say yes to.")
-            else:
-                st.caption("No clean two-way fits right now. The upgrade targets under My team → Trade ideas show who "
-                           "owns each player.")
+            render_trades(LS, lg, R, pick, tnames, slots_all)
     with tabs[4]:
         if not pick:
             st.caption("Pick your team above.")
@@ -3998,6 +4149,100 @@ def set_lineup_list(S, t, T):
     es = resolve_entries(S, t)
     out = [{"slot": e["slot"], "p": T["projs"].get(entry_key(e)), "e": e} for e in ordered_entries(es, "start")]
     return out
+
+
+def trade_side_html(S, players, color, title):
+    rows = []
+    for k, pos, rate in players:
+        p = S.players.get(k) or {}
+        nm = (S.season_tot.get(k) or {}).get("name") or p.get("name") or k
+        team = pr.player_team(S, k)
+        rows.append(f'<div style="display:flex;align-items:center;gap:.45rem;margin:.15rem 0">{logo(team, 22)}'
+                    f'{plink(k, nm)} <span class="fr-dim">{pos} · {rate:.1f}/g</span></div>')
+    return f'<div><div class="fr-cardh" style="color:{color}">{title}</div>{"".join(rows)}</div>'
+
+
+def render_trades(S, lg, R, pick, tnames, slots):
+    needs = R["teams"][pick]["needs"]
+    H(notes_html([("down", f"Your weakest spots: {', '.join(needs)}.")] if needs else
+                 [("up", "Every starting spot is at or above an average starter in this league.")]))
+    weeks = remaining_weeks(S)
+    P = R.get("partners") or []
+    sec("Best trades for you (that they'd likely accept)")
+    if P:
+        items = []
+        for t in P:
+            fit_col = GREEN if t["fit"] == "win-win" else BLUE
+            items.append(
+                f'<div class="fr-card" style="margin-bottom:.5rem"><div style="display:flex;justify-content:space-between;'
+                f'flex-wrap:wrap;gap:.4rem"><div class="fr-cardh" style="color:{fit_col}">With {esc(t["team"])} · '
+                f'{t["fit"]}</div><div class="fr-dim">your lineup <b style="color:#4ade80">{t["mg"]:+.1f}/g</b> '
+                f'(≈{t["ros_gain"]:+.0f} pts rest of season) · theirs <b style="color:{GREEN if t["tg"] >= 0 else AMBER}">'
+                f'{t["tg"]:+.1f}/g</b> · on paper they get {t["their_in"]:.1f} PPG for {t["their_out"]:.1f}</div></div>'
+                f'<div style="display:flex;flex-wrap:wrap;gap:1rem;align-items:center;'
+                f'justify-content:space-between;margin-top:.35rem">'
+                f'{trade_side_html(S, t["give"], RED, "You give")}<div style="font-size:1.4rem;color:{MUTED}">⇄</div>'
+                f'{trade_side_html(S, t["get"], GREEN, "You get")}</div></div>')
+        H("".join(items))
+        st.caption("Every possible 1-for-1 and 2-for-1 swap with every team. Ranked by how much it improves your best "
+                   f"starting lineup over the rest of the season ({weeks} weeks, schedule included, rosters kept "
+                   "full), kept only if their lineup doesn't take a real hit and it looks fair on paper to them "
+                   "(points per game so far, which is how most managers judge). The edge: you're trading on the "
+                   "model, they're trading on box scores. Win-win = both lineups improve; sells itself = looks like a "
+                   "win to them. /g = points per game.")
+    else:
+        st.caption("No trades that clearly improve your lineup without hurting theirs right now.")
+    sec("Trade analyzer")
+    others = [t["id"] for t in lg["teams"] if t["id"] != pick]
+    c1, c2, c3 = st.columns([1.2, 2, 2])
+    tid = c1.selectbox("Trade with", others, format_func=lambda i: tnames[i], key="ta_team")
+    me = next(t for t in lg["teams"] if t["id"] == pick)
+    them = next(t for t in lg["teams"] if t["id"] == tid)
+    mine, theirs = roster_rates(S, team_keys(S, me)[0]), roster_rates(S, team_keys(S, them)[0])
+    nm = lambda k: (S.season_tot.get(k) or {}).get("name") or (S.players.get(k) or {}).get("name") or k  # noqa: E731
+    give = c2.multiselect("You give", [p[0] for p in sorted(mine, key=lambda p: -p[2])], format_func=nm, key="ta_give",
+                          placeholder="Your players")
+    get = c3.multiselect("You get", [p[0] for p in sorted(theirs, key=lambda p: -p[2])], format_func=nm, key="ta_get",
+                         placeholder="Their players")
+    if give or get:
+        owned = {p[0] for t_ in lg["teams"] for p in roster_rates(S, team_keys(S, t_)[0])}
+        mg, tg = evaluate_trade(S, slots, mine, theirs, give, get, waiver_rates(S, owned))
+        po = [w for w in pr.FANTASY_PLAYOFF_WEEKS if w >= (pr.next_week(S) or 99)]
+
+        def weekly_gain(roster_keys, out_keys, in_keys, w):
+            def tot(keys):
+                ps = {k: project_any(S, k, w) for k in keys}
+                return lineup_pg([(k, p["pos"], p["proj"]) for k, p in ps.items() if p and p["pos"] in pr.FANTASY_POS],
+                                 slots)
+            before = tot(roster_keys)
+            after = tot([k for k in roster_keys if k not in out_keys] + list(in_keys))
+            return after - before
+        mk_ = [p[0] for p in mine]
+        po_gain = sum(weekly_gain(mk_, give, get, w) for w in po) if po else None
+        give_val = sum(ros_rate(S, k) or 0 for k in give)
+        get_val = sum(ros_rate(S, k) or 0 for k in get)
+        verdict, vcol = (("Accept", GREEN) if mg >= 0.8 else ("Lean accept", "#86efac") if mg >= 0.25 else
+                         ("Neutral", MUTED) if mg > -0.25 else ("Lean decline", "#fca5a5") if mg > -0.8 else
+                         ("Decline", RED))
+        def mkt(k):
+            t_ = S.season_tot.get(k)
+            return t_["ppg"] if t_ else (ros_rate(S, k) or 0)
+        their_in, their_out = sum(mkt(k) for k in give), sum(mkt(k) for k in get)
+        ratio = their_in / their_out if their_out else 2.0
+        they = ("they'd likely say yes" if (tg >= 0.2 or ratio >= 1.08) and ratio >= 0.95 else
+                "a fair ask" if ratio >= 0.95 and tg >= -0.3 else "they'd probably say no")
+        H('<div class="fr-grid">' + "".join([
+            kpi("Verdict for you", verdict, f"{they}", vcol, vcol),
+            kpi("Your lineup", f"{mg:+.1f}/g", f"≈{mg * weeks:+.0f} pts over {weeks} weeks", GREEN if mg > 0 else RED,
+                GREEN if mg > 0 else RED),
+            kpi("Fantasy playoffs", f"{po_gain:+.1f}" if po_gain is not None else "–",
+                f"weeks {pr.FANTASY_PLAYOFF_WEEKS[0]}-{pr.FANTASY_PLAYOFF_WEEKS[-1]}, real matchups",
+                GREEN if (po_gain or 0) > 0 else RED if (po_gain or 0) < 0 else BORDER),
+            kpi("Their side", f"{tg:+.1f}/g", f"on paper: {their_in:.1f} PPG in for {their_out:.1f} out",
+                GREEN if tg > 0 else AMBER, TEXT),
+        ]) + "</div>")
+        st.caption("Judged by your best starting lineup, not raw player value: a better player you can't start (or "
+                   "losing depth you need) shows up here. Rates are the model's rest-of-season points per game.")
 
 
 def render_matchup(S, lg, R, pick, tnames, week):

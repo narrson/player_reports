@@ -272,6 +272,8 @@ class Season:
         self.xfp = {}
         self.xfp_basis = None
         self.xfp_raw = {}
+        self.prior_weekly_raw = []
+        self.prior_xfp_raw = {}
         self.schedule = []
         self.injuries = {}
         self.inj_hist = defaultdict(list)
@@ -325,12 +327,13 @@ def load_season(S):
             raise ValueError("no plays")
         return df
 
-    def _weekly():
-        df = nfl.load_player_stats(S.season, summary_level="week")
+    def _weekly_rows(season):
+        df = nfl.load_player_stats(season, summary_level="week")
         if "season_type" in df.columns:
             df = df.filter(pl.col("season_type") == "REG")
+        out = []
         for r in df.to_dicts():
-            S.weekly_raw.append({
+            out.append({
                 "pid": r.get("player_id"), "name": first(r, "player_display_name", "player_name"),
                 "pos": norm_pos(first(r, "position", "position_group")),
                 "team": first(r, "team", "recent_team"), "opp": first(r, "opponent_team", "opponent"),
@@ -348,6 +351,10 @@ def load_season(S):
                 + num(r, "receiving_fumbles_lost"),
                 "st_td": num(r, "special_teams_tds"),
             })
+        return out
+
+    def _weekly():
+        S.weekly_raw = _weekly_rows(S.season)
         if not S.weekly_raw:
             raise ValueError("no rows")
 
@@ -419,13 +426,13 @@ def load_season(S):
         if not season_rows:
             raise ValueError("no rows")
 
-    def _xfp():
+    def _xfp_rows(season):
         try:
-            df = nfl.load_ff_opportunity(seasons=S.season, stat_type="weekly", model_version="latest")
+            df = nfl.load_ff_opportunity(seasons=season, stat_type="weekly", model_version="latest")
         except TypeError:
-            df = nfl.load_ff_opportunity(S.season)
+            df = nfl.load_ff_opportunity(season)
         has_comp = all(k in df.columns for k in XFP_KEYS[:8])
-        S.xfp_basis = "your scoring" if has_comp else "full PPR (nflverse default)"
+        out = {}
         for r in df.to_dicts():
             if g(r, "season_type", "REG") != "REG":
                 continue
@@ -435,8 +442,20 @@ def load_season(S):
             raw = {k: num(r, k) for k in XFP_KEYS} if has_comp else {}
             raw["total"] = g(r, "total_fantasy_points_exp")
             raw["pos"] = norm_pos(g(r, "position"))
-            S.xfp_raw[(pid, int(wk))] = raw
+            out[(pid, int(wk))] = raw
+        return out, has_comp
+
+    def _xfp():
+        S.xfp_raw, has_comp = _xfp_rows(S.season)
+        S.xfp_basis = "your scoring" if has_comp else "full PPR (nflverse default)"
         if not S.xfp_raw:
+            raise ValueError("no rows")
+
+    def _prior():
+        """Last season's per-game production and usage: the 'preseason expectation' blended into projections."""
+        S.prior_weekly_raw = _weekly_rows(S.season - 1)
+        S.prior_xfp_raw = _xfp_rows(S.season - 1)[0]
+        if not S.prior_weekly_raw:
             raise ValueError("no rows")
 
     def _schedule():
@@ -493,6 +512,7 @@ def load_season(S):
     for st in ("receiving", "rushing", "passing"):
         step(f"Next Gen Stats ({st})", lambda st=st: _ngs(st))
     step("Expected fantasy points", _xfp)
+    step("Last season (for priors)", _prior)
     step("Schedule & Vegas lines", _schedule)
     step("Injury reports", _injuries)
     del pbp_df
@@ -507,11 +527,25 @@ def load_season(S):
 # ------------------------------------------------------------------------------------
 
 SCORING_DEPENDENT = {"scoring", "fmt_name", "weekly", "season_tot", "pos_counts", "fpa", "fpa_avg", "xfp", "_pool",
-                     "_base", "_posproj", "_kdef", "weeks_played", "last_week", "min_games", "scoring_key"}
+                     "_base", "_posproj", "_kdef", "_role", "_model", "_kdef_pool", "_team_pos", "_gapc", "_rosr", "pos_eff", "pos_td", "prior", "pos_prior", "weeks_played", "last_week", "min_games", "scoring_key"}
 
 
 def scoring_key(sc):
     return tuple(sorted((k, round(float(v), 4)) for k, v in sc.items()))
+
+
+def xfp_value(r, sc):
+    """(expected points, (exp rec TD, exp rush TD, exp pass TD)) for one raw ffopportunity row."""
+    if "receptions_exp" in r:
+        rec_pts = sc["rec"] + (sc.get("te_rec", 0) if r.get("pos") == "TE" else 0)
+        x = (rec_pts * r["receptions_exp"] + sc["rec_yd"] * r["rec_yards_gained_exp"]
+             + sc["rec_td"] * r["rec_touchdown_exp"] + sc["rush_yd"] * r["rush_yards_gained_exp"]
+             + sc["rush_td"] * r["rush_touchdown_exp"] + sc["pass_yd"] * r["pass_yards_gained_exp"]
+             + sc["pass_td"] * r["pass_touchdown_exp"] + sc["int"] * r["pass_interception_exp"]
+             + sc["two_pt"] * (r["rec_two_point_conv_exp"] + r["rush_two_point_conv_exp"]
+                               + r["pass_two_point_conv_exp"]))
+        return x, (r["rec_touchdown_exp"], r["rush_touchdown_exp"], r["pass_touchdown_exp"])
+    return r.get("total"), (0.0, 0.0, 0.0)
 
 
 def compute_xfp(S):
@@ -521,21 +555,97 @@ def compute_xfp(S):
     sc = S.scoring
     S.xfp = {}
     for key, r in S.xfp_raw.items():
-        if "receptions_exp" in r:
-            rec_pts = sc["rec"] + (sc.get("te_rec", 0) if r.get("pos") == "TE" else 0)
-            x = (rec_pts * r["receptions_exp"] + sc["rec_yd"] * r["rec_yards_gained_exp"]
-                 + sc["rec_td"] * r["rec_touchdown_exp"] + sc["rush_yd"] * r["rush_yards_gained_exp"]
-                 + sc["rush_td"] * r["rush_touchdown_exp"] + sc["pass_yd"] * r["pass_yards_gained_exp"]
-                 + sc["pass_td"] * r["pass_touchdown_exp"] + sc["int"] * r["pass_interception_exp"]
-                 + sc["two_pt"] * (r["rec_two_point_conv_exp"] + r["rush_two_point_conv_exp"]
-                                   + r["pass_two_point_conv_exp"]))
-            exp = (r["rec_touchdown_exp"], r["rush_touchdown_exp"], r["pass_touchdown_exp"])
-        else:
-            x = r.get("total")
-            exp = (0.0, 0.0, 0.0)
+        x, exp = xfp_value(r, sc)
         if x is None:
             continue
         S.xfp[key] = {"xfp": x, "exp_rec_td": exp[0], "exp_rush_td": exp[1], "exp_pass_td": exp[2]}
+
+
+def compute_priors(S):
+    """Last season per player (scored with this league's rules) plus position averages for rookies."""
+    sc = S.scoring
+    S.prior = {}
+    by = defaultdict(list)
+    for r in getattr(S, "prior_weekly_raw", []) or []:
+        if r.get("pos") in FANTASY_POS and r.get("pid"):
+            by[r["pid"]].append(r)
+    praw = getattr(S, "prior_xfp_raw", {}) or {}
+    for pid, rows in by.items():
+        pts, xs, eff = [], [], []
+        for r in rows:
+            p = fantasy_points(r, sc)
+            pts.append(p)
+            raw = praw.get((pid, r["week"]))
+            if raw:
+                x, _ = xfp_value(raw, sc)
+                if x is not None:
+                    xs.append(x)
+                    eff.append(p - x)
+        S.prior[pid] = {"games": len(rows), "ppg": mean(pts), "xfp_pg": mean(xs), "eff_pg": mean(eff) or 0.0,
+                        "pos": rows[-1]["pos"]}
+    # Position baselines for efficiency and TD luck: regress toward these (not zero), so any systematic
+    # miss in the expected-points model for a position (e.g. QB rushing) is corrected automatically.
+    S.pos_eff, S.pos_td = {}, {}
+    for pos in FANTASY_POS:
+        effs, tds = [], []
+        for pid, t in S.season_tot.items():
+            if t["pos"] != pos or t["games"] < 3:
+                continue
+            for r in S.weekly[pid]:
+                x = S.xfp.get((pid, r["week"]))
+                if not x:
+                    continue
+                td = ((r["rec_td"] + r["rush_td"] - x["exp_rec_td"] - x["exp_rush_td"]) * sc["rush_td"]
+                      + (r["pass_td"] - x["exp_pass_td"]) * sc["pass_td"])
+                effs.append(r["pts"] - x["xfp"] - td)
+                tds.append(td)
+        S.pos_eff[pos] = mean(effs) or 0.0
+        S.pos_td[pos] = mean(tds) or 0.0
+    S.pos_prior = {}
+    for pos in FANTASY_POS:
+        vals = []
+        for pid, t in S.season_tot.items():
+            if t["pos"] != pos or t["games"] < 3:
+                continue
+            xs = [S.xfp[(pid, r["week"])]["xfp"] for r in S.weekly[pid] if (pid, r["week"]) in S.xfp]
+            if xs:
+                vals.append(mean(xs))
+        vals.sort()
+        # a new player's prior: the 40th percentile of players with real roles at his position
+        S.pos_prior[pos] = {"xfp_pg": vals[int(len(vals) * 0.4)] if vals else 6.0, "eff_pg": 0.0, "games": 0,
+                            "ppg": None}
+
+
+def adjust_defenses(S):
+    """Opponent-adjusted defense ratings: points allowed relative to what each offense usually scores,
+    regressed toward average, so a defense that faced weak offenses doesn't look like a smash spot."""
+    off = defaultdict(float)
+    for rows in S.weekly.values():
+        for r in rows:
+            off[(r["team"], r["pos"], r["week"])] += r["pts"]
+    team_pos = defaultdict(list)
+    for (t, p, w), v in off.items():
+        team_pos[(t, p)].append((w, v))
+    opp_of = {}
+    for gm in S.schedule:
+        if gm["home_score"] is not None:
+            opp_of[(gm["home"], gm["week"])] = gm["away"]
+            opp_of[(gm["away"], gm["week"])] = gm["home"]
+    for (d, pos), f in S.fpa.items():
+        ratios = []
+        for w, allowed in ((w, v) for (t, p, w), v in off.items() if p == pos and opp_of.get((t, w)) == d):
+            o = opp_of.get((d, w))
+            games = [v for ww, v in team_pos.get((o, pos), []) if ww != w]
+            base = mean(games)
+            if base and base > 0.5:
+                ratios.append(allowed / base)
+        n = len(ratios)
+        f["adj"] = (sum(ratios) + 4 * 1.0) / (n + 4) if n else 1.0
+        f["adj_games"] = n
+    for pos in FANTASY_POS:
+        items = sorted([(k, v) for k, v in S.fpa.items() if k[1] == pos], key=lambda kv: -kv[1]["adj"])
+        for i, (_, v) in enumerate(items, 1):
+            v["rank"], v["n"] = i, len(items)
 
 
 def prepare(S):
@@ -561,7 +671,7 @@ def prepare_scoring(S):
     sc = S.scoring
     S.scoring_key = scoring_key(sc)
     S._pool = {}
-    for k in ("_base", "_posproj", "_kdef"):
+    for k in ("_base", "_posproj", "_kdef", "_role", "_model", "_kdef_pool", "_team_pos", "_gapc", "_rosr"):
         if hasattr(S, k):
             delattr(S, k)
     compute_xfp(S)
@@ -618,6 +728,8 @@ def prepare_scoring(S):
         for i, (_, v) in enumerate(items, 1):
             v["rank"], v["n"] = i, len(items)
         S.fpa_avg[pos] = mean([v["avg"] for _, v in items])
+    adjust_defenses(S)
+    compute_priors(S)
 
 
 def prepare_static(S):
@@ -1529,6 +1641,10 @@ def build_report(S, pid):
         shorts[g(r, "passer_player_name")] += 1
     shorts.pop(None, None)
     rep["short"] = shorts.most_common(1)[0][0] if shorts else ""
+    try:
+        rep["market"] = market_view(S, pid)
+    except Exception:
+        rep["market"] = None
     rep["insights"] = build_insights(rep)
     return rep
 
@@ -1555,8 +1671,24 @@ def build_insights(rep):
         tier = f"{pos}{(r - 1) // 12 + 1}" if r <= 48 else "outside the top 48"
         add(10, "info", f"{pos}{r} in points per game ({p['ppg']:.1f} PPG) among {pc[1]} {pos}s with "
                         f"{rep['min_games']}+ games, which is {tier} production.")
+    mv = rep.get("market")
+    if mv:
+        why = "; ".join(mv["why"][:3])
+        why = f" ({why})" if why else ""
+        if "buy_low" in mv["tags"]:
+            add(9.5, "up", f"Model expects {mv['ros_rate']:.1f} points per game from here vs {mv['ppg']:.1f} so far"
+                           f"{why}. His role should produce more than it has. Buy-low.")
+        if "sell_high" in mv["tags"]:
+            add(9, "down", f"Model expects {mv['ros_rate']:.1f} points per game from here vs {mv['ppg']:.1f} so far"
+                           f"{why}. He's outscoring his role. Sell-high candidate.")
+        if "buy_high" in mv["tags"]:
+            add(8.5, "up", f"Already producing and his role is growing ({mv['role']['before']:.1f} to "
+                           f"{mv['role']['recent']:.1f} expected pts/game). Worth paying full price.")
+        if "sell_low" in mv["tags"]:
+            add(8.5, "down", f"His role is shrinking ({mv['role']['before']:.1f} to {mv['role']['recent']:.1f} expected "
+                             f"pts/game over the last 3). Consider moving him before it shows up in his scoring.")
     f, rg, tdo = m.get("fpoe_pg"), m.get("regress_pg"), m.get("td_oe_pg")
-    if f is not None and m.get("xfp_games", 0) >= 3:
+    if f is not None and m.get("xfp_games", 0) >= 3 and not mv:
         if rg is not None and rg <= -2:
             add(9, "up", f"Scoring {f:+.1f} points per game versus what his usage predicts "
                          f"({m['xfp_pg']:.1f} expected, {p['ppg']:.1f} actual), largely from touchdown luck "
@@ -1745,17 +1877,141 @@ def key_teammates(S, pid, pos, team):
     return out
 
 
+# ---------------------------------------------------------------------------------------------
+# Rating model
+#   Built on what research says carries forward week to week:
+#   * opportunity (expected points from targets, carries, depth, field position) is the stable signal;
+#   * efficiency beyond that is mostly noise in-season, so it is regressed hard toward his prior;
+#   * touchdowns above/below expectation are essentially random, so they are almost entirely discounted;
+#   * hot and cold streaks mostly regress to the season average, so recent games only get extra weight
+#     when his ROLE changed (snaps, routes, share) by more than normal week-to-week noise;
+#   * early in the season last year's production (the "preseason expectation") is still as predictive as
+#     this season's games, so it is blended in Bayesian-style and fades as games pile up.
+# ---------------------------------------------------------------------------------------------
+
+K_OPP = 3.0                                             # prior weight on usage, in games
+K_EFF = {"QB": 9.0, "RB": 15.0, "WR": 12.0, "TE": 12.0}  # prior weight on efficiency, in games (backtest-tuned)
+K_TD = 60.0                                               # TD luck is ~all noise (backtest-tuned)
+ROLE_SHARE = {"WR": "tgt_share", "TE": "tgt_share", "RB": "opp_share", "QB": "dropbacks"}
+
+
+def ewma(vals, half_life):
+    """Exponentially weighted mean, oldest -> newest."""
+    vals = [v for v in vals if v is not None]
+    if not vals:
+        return None
+    a = 0.5 ** (1.0 / half_life)
+    w, tot, wsum = 1.0, 0.0, 0.0
+    for v in reversed(vals):
+        tot += w * v
+        wsum += w
+        w *= a
+    return tot / wsum
+
+
+def game_series(S, pid, weeks):
+    rows = {r["week"]: r for r in S.weekly.get(pid, [])}
+    sc = S.scoring
+    out = []
+    for w in weeks:
+        r = rows.get(w)
+        x = S.xfp.get((pid, w))
+        td_oe = None
+        if x and r:
+            td_oe = ((r["rec_td"] + r["rush_td"] - x["exp_rec_td"] - x["exp_rush_td"]) * sc["rush_td"]
+                     + (r["pass_td"] - x["exp_pass_td"]) * sc["pass_td"])
+        out.append({"week": w, "pts": r["pts"] if r else 0.0, "xfp": x["xfp"] if x else None, "td_oe": td_oe})
+    return out
+
+
+def role_signal(S, pid, pos, weeks=None):
+    """Did his role really change? Compares the last 3 games with the earlier ones on expected points and
+    on the role stats behind it (snap share, route participation, target / opportunity share)."""
+    weeks = list(weeks if weeks is not None else player_weeks(S, pid))
+    key = (pid, tuple(weeks))
+    cache = S.__dict__.setdefault("_role", {})
+    if key in cache:
+        return cache[key]
+    out = None
+    if len(weeks) >= 5:
+        U = [usage_week(S, pid, w) for w in weeks]
+        for u in U:
+            u["opp_share"] = div((u["targets"] or 0) + (u["carries"] or 0),
+                                 (u["team_targets"] or 0) + (u["team_carries"] or 0))
+        rec, bef = U[-3:], U[:-3]
+        xs = [u["xfp"] for u in U if u["xfp"] is not None]
+        rx, bx = mean([u["xfp"] for u in rec]), mean([u["xfp"] for u in bef])
+        if rx is not None and bx is not None and len(xs) >= 4:
+            sd = statistics.pstdev(xs) or 1.0
+            z = (rx - bx) / (sd * math.sqrt(1 / 3 + 1 / max(1, len(bef))))
+
+            def d(k, scale=1.0):
+                a_, b_ = mean([u.get(k) for u in rec]), mean([u.get(k) for u in bef])
+                return (a_ - b_) * scale if a_ is not None and b_ is not None else None
+            parts = {"snap": d("snap_pct"), "route": d("route_pct", 100), "share": d(ROLE_SHARE[pos], 100 if pos != "QB" else 1)}
+            thr = {"snap": 8.0, "route": 8.0, "share": 4.0 if pos != "QB" else 4.0}
+            agree = [k for k, v in parts.items() if v is not None and abs(v) >= thr[k] and (v > 0) == (z > 0)]
+            flag = abs(z) >= 2.4 or (abs(z) >= 1.6 and len(agree) >= 1)
+            out = {"z": z, "recent": rx, "before": bx, "delta": rx - bx, "parts": parts, "agree": agree,
+                   "flag": flag, "n_before": len(bef)}
+    cache[key] = out
+    return out
+
+
+def player_prior(S, pid, pos):
+    p = getattr(S, "prior", {}).get(pid)
+    if p and p["games"] >= 4 and p.get("xfp_pg") is not None:
+        return p, "last season"
+    return getattr(S, "pos_prior", {}).get(pos), "position average"
+
+
+def model_rate(S, pid, pos, weeks):
+    """Points per game this player should be expected to score going forward (before matchup / Vegas)."""
+    ser = game_series(S, pid, weeks)
+    xs = [s_["xfp"] for s_ in ser if s_["xfp"] is not None]
+    n = len(xs)
+    prior, src = player_prior(S, pid, pos)
+    det = {"n": n, "prior_src": src}
+    if n == 0:
+        pts = [s_["pts"] for s_ in ser]
+        ppg = mean(pts) or 0.0
+        pri = (prior or {}).get("ppg") or (prior or {}).get("xfp_pg") or ppg
+        rate = (len(pts) * ppg + 3 * pri) / (len(pts) + 3) if pts else pri
+        det.update(opp=rate, eff=0.0, td=0.0, mode="scoring")
+        return max(0.0, rate), det
+    season = mean(xs)
+    rs = role_signal(S, pid, pos, weeks)
+    if rs and rs["flag"]:
+        obs = 0.7 * rs["recent"] + 0.3 * season
+        det["mode"] = "new role"
+    else:
+        obs = ewma(xs, 6.0)
+        det["mode"] = "season"
+    det["role"] = rs
+    pri_x = (prior or {}).get("xfp_pg") if src == "last season" else None
+    # Usage is the stable signal: with no real prior (rookies, new starters) trust his own usage.
+    opp = (n * obs + K_OPP * pri_x) / (n + K_OPP) if pri_x is not None else obs
+    effs = [s_["pts"] - s_["xfp"] - (s_["td_oe"] or 0) for s_ in ser if s_["xfp"] is not None]
+    eff_obs = mean(effs) or 0.0
+    base_eff = getattr(S, "pos_eff", {}).get(pos, 0.0)
+    base_td = getattr(S, "pos_td", {}).get(pos, 0.0)
+    pri_eff = base_eff + (0.5 * (((prior or {}).get("eff_pg") or 0.0) - base_eff) if src == "last season" else 0.0)
+    k = K_EFF.get(pos, 8.0)
+    eff = (n * eff_obs + k * pri_eff) / (n + k)
+    tds = [s_["td_oe"] for s_ in ser if s_["td_oe"] is not None]
+    td = base_td + (sum(t_ - base_td for t_ in tds) / (len(tds) + K_TD) if tds else 0.0)
+    det.update(opp=opp, obs=obs, season_xfp=season, eff=eff, eff_obs=eff_obs, td=td,
+               td_obs=mean(tds) if tds else 0.0, prior_xfp=pri_x)
+    return max(0.0, opp + eff + td), det
+
+
 def _usage_base(S, pid, pos, weeks):
+    rate, det = model_rate(S, pid, pos, weeks)
     m = player_metrics(S, pid, pos, weeks)
     l3 = player_metrics(S, pid, pos, weeks[-3:]) if len(weeks) >= 4 else None
     xs, xl = m.get("xfp_pg"), (l3 or {}).get("xfp_pg")
-    if xs is not None:
-        x = 0.55 * xs + 0.45 * xl if xl is not None else xs
-        eff = (m.get("eff_oe_pg") or 0) * 0.5 * min(1.0, m["games"] / 8)
-        return max(0.0, x + eff), m, xs, xl, "usage"
-    ppg, l3p = m.get("ppg"), (l3 or {}).get("ppg")
-    base = (0.6 * ppg + 0.4 * l3p) if (ppg is not None and l3p is not None) else (ppg or 0.0)
-    return base, m, xs, xl, "scoring"
+    m["_model"] = det
+    return rate, m, xs, xl, "usage" if det.get("mode") != "scoring" else "scoring"
 
 
 def player_base(S, pid):
@@ -1828,7 +2084,8 @@ def player_base(S, pid):
     n = len(pts)
     sd = (sd_p * n + POS_SD[pos] * 4) / (n + 4)
     out = {"pid": pid, "pos": pos, "m": m, "base": base, "xfp_season": xs, "xfp_last3": xl, "src": src, "sd": sd,
-           "games": m["games"], "depth": depth, "returning": returning, "team": team}
+           "games": m["games"], "depth": depth, "returning": returning, "team": team,
+           "model": (m.get("_model") or model_rate(S, pid, pos, weeks)[1])}
     S._base[pid] = out
     return out
 
@@ -1877,7 +2134,10 @@ def project_player(S, pid, week=None, injuries=True):
         out.update(opp=opp, home=home, label=f"{'vs' if home else '@'} {opp}")
         f = S.fpa.get((opp, pos))
         avg = S.fpa_avg.get(pos)
-        if f and avg:
+        if f and f.get("adj") is not None:
+            mf = _clamp(1 + 0.85 * (f["adj"] - 1), 0.82, 1.18)  # adj is already opponent-adjusted and regressed
+            out.update(fpa_rank=f["rank"], fpa_n=f["n"])
+        elif f and avg:
             w = min(1.0, f["games"] / 6)
             mf = _clamp(1 + 0.5 * w * (f["avg"] / avg - 1), 0.85, 1.15)
             out.update(fpa_rank=f["rank"], fpa_n=f["n"])
@@ -1896,20 +2156,27 @@ def project_player(S, pid, week=None, injuries=True):
     boom = BOOM_BUST[pos][0]
     out.update(proj=proj, floor=max(0.0, proj - 0.84 * sd), ceiling=proj + 0.84 * sd, sd=sd,
                boom_prob=(1 - _norm_cdf((boom - proj) / sd)) if sd > 0 else 0.0, mf=mf, vf=vf, injf=injf)
-    if b["xfp_season"] is not None:
-        txt = f"Usage worth {b['xfp_season']:.1f} expected points per game"
-        if b["xfp_last3"] is not None:
-            txt += f" ({b['xfp_last3']:.1f} over the last 3)"
-        tone = "up" if (b["xfp_last3"] or 0) > b["xfp_season"] + 2 else \
-            "down" if b["xfp_last3"] is not None and b["xfp_last3"] < b["xfp_season"] - 2 else "info"
-        out["reasons"].append((tone, txt + "."))
+    md = b.get("model") or {}
+    if md.get("mode") in ("season", "new role"):
+        rs = md.get("role")
+        if md["mode"] == "new role" and rs:
+            out["reasons"].append(("up" if rs["delta"] > 0 else "down",
+                                   f"Role change: {rs['recent']:.1f} expected pts/game over the last 3 vs "
+                                   f"{rs['before']:.1f} before, so the new role is trusted."))
+        else:
+            out["reasons"].append(("info", f"Usage worth {md['season_xfp']:.1f} expected points per game this season."))
+        if md.get("prior_xfp") is not None and md["n"] < 8:
+            out["reasons"].append(("info", f"Blended with {md['prior_src']} ({md['prior_xfp']:.1f} xFP/g), "
+                                           f"which counts for less as the season goes on."))
+        if abs(md.get("eff_obs", 0)) >= 1.5:
+            out["reasons"].append(("up" if md["eff"] > 0 else "down",
+                                   f"Efficiency {md['eff_obs']:+.1f} pts/game vs usage; only {md['eff']:+.1f} carried "
+                                   f"forward (efficiency is mostly noise in-season)."))
+        if abs(md.get("td_obs", 0)) >= 1.5:
+            out["reasons"].append(("info", f"TD luck {md['td_obs']:+.1f} pts/game ignored (touchdowns above or "
+                                           f"below expectation don't carry forward)."))
     else:
         out["reasons"].append(("info", f"Based on {b['games']} game(s) of scoring (no usage model yet)."))
-    eff = b["m"].get("eff_oe_pg")
-    if eff is not None and abs(eff) >= 1.5:
-        out["reasons"].append(("up" if eff > 0 else "down",
-                               f"{'Beats' if eff > 0 else 'Trails'} his usage by {abs(eff):.1f} pts/game through "
-                               f"efficiency; half of that is carried forward."))
     if out["fpa_rank"]:
         pctv = int(round((mf - 1) * 100))
         out["reasons"].append(("up" if mf > 1.02 else "down" if mf < 0.98 else "info",
@@ -2100,6 +2367,127 @@ def ros_kdef(S, kind, ident):
     if not nw:
         return 0.0
     return sum(project_kdef(S, kind, ident, w)["proj"] for w in range(nw, FANTASY_PLAYOFF_WEEKS[-1] + 1))
+
+
+# ---------------------------------------------------------------------------------------------
+# Market vs model: buy low / sell high / buy high / sell low
+# ---------------------------------------------------------------------------------------------
+
+def schedule_factor(S, pid, weeks_ahead=None):
+    """Average matchup multiplier over his remaining games (1.0 = neutral)."""
+    nw = next_week(S)
+    if not nw:
+        return 1.0
+    last = FANTASY_PLAYOFF_WEEKS[-1]
+    vals = []
+    for w in range(nw, last + 1):
+        p = project_player(S, pid, w, injuries=False)
+        if p and not p["bye"] and p.get("mf"):
+            vals.append(p["mf"])
+    return mean(vals) or 1.0
+
+
+def gap_center(S, pos):
+    """Typical (median) gap between model and production at a position, so buy/sell flags only mark true
+    outliers even if the whole league is running hot or cold on touchdowns this season."""
+    cache = S.__dict__.setdefault("_gapc", {})
+    if pos not in cache:
+        pool, _ = position_pool(S, pos)
+        gaps = []
+        for pid in pool:
+            b = player_base(S, pid)
+            t = S.season_tot.get(pid)
+            if b and t and t["games"] >= 3:
+                gaps.append(b["base"] - t["ppg"])
+        gaps.sort()
+        cache[pos] = gaps[len(gaps) // 2] if gaps else 0.0
+    return cache[pos]
+
+
+def market_view(S, pid):
+    """How this player is likely valued (his production so far) vs what the model expects going forward."""
+    cache = S.__dict__.setdefault("_model", {})
+    if pid in cache:
+        return cache[pid]
+    b = player_base(S, pid)
+    t = S.season_tot.get(pid)
+    if not b or not t or t["games"] < 3:
+        cache[pid] = None
+        return None
+    md = b.get("model") or {}
+    rate, ppg = b["base"], t["ppg"]
+    sf = schedule_factor(S, pid)
+    center = gap_center(S, b["pos"])
+    rs = role_signal(S, pid, b["pos"])
+    out = {"pid": pid, "pos": b["pos"], "team": b.get("team"), "name": t["name"], "ppg": ppg, "rate": rate,
+           "ros_rate": rate * sf, "gap": rate * sf - ppg - center, "raw_gap": rate * sf - ppg, "sched": sf, "role": rs,
+           "td": md.get("td_obs", 0.0), "eff": md.get("eff_obs", 0.0), "eff_kept": md.get("eff", 0.0),
+           "games": t["games"], "rank_ppg": t.get("rank_ppg")}
+    trend_z = rs["z"] if rs else 0.0
+    starter_cut = {"QB": 12, "TE": 12}.get(b["pos"], 24)
+    good = (t.get("rank_ppg") or 999) <= starter_cut
+    tags = []
+    thr = max(1.5, 0.15 * max(ppg, rate))
+    out["thr"] = thr
+    if out["gap"] >= thr:
+        tags.append("buy_low")
+    if out["gap"] <= -thr:
+        tags.append("sell_high")
+    if good and trend_z >= 1.4 and out["gap"] >= -0.5 and (rs or {}).get("flag"):
+        tags.append("buy_high")
+    if trend_z <= -1.4 and (rs or {}).get("flag") and out["gap"] <= 0.5:
+        tags.append("sell_low")
+    out["tags"] = tags
+    why = []
+    if abs(out["td"]) >= 1.0:
+        why.append(f"TD luck {out['td']:+.1f}/g")
+    if abs(out["eff"]) >= 1.5:
+        why.append(f"efficiency {out['eff']:+.1f}/g")
+    if rs and rs["flag"]:
+        why.append(f"role {'up' if rs['delta'] > 0 else 'down'} {abs(rs['delta']):.1f} xFP")
+    if abs(sf - 1) >= 0.04:
+        why.append(f"{'easy' if sf > 1 else 'tough'} schedule ({(sf - 1) * 100:+.0f}%)")
+    out["why"] = why
+    cache[pid] = out
+    return out
+
+
+def backtest(S, min_prior=3, horizon=3):
+    """Walk-forward check of the model on this season: at each week, project every player using only the games
+    before it, then compare with what he actually scored over his next `horizon` games. Baselines: points per game
+    so far, and the average of his last 3 games (what most rankings lean on)."""
+    rows = []
+    for pos in FANTASY_POS:
+        pool, _ = position_pool(S, pos)
+        for pid in pool:
+            weeks = player_weeks(S, pid)
+            if len(weeks) < min_prior + 1:
+                continue
+            pts = {r["week"]: r["pts"] for r in S.weekly.get(pid, [])}
+            for i in range(min_prior, len(weeks)):
+                past, fut = weeks[:i], weeks[i:i + horizon]
+                actual = mean([pts.get(w, 0.0) for w in fut])
+                rate, _ = model_rate(S, pid, pos, past)
+                hist = [pts.get(w, 0.0) for w in past]
+                rows.append({"pos": pos, "actual": actual, "model": rate, "ppg": mean(hist), "last3": mean(hist[-3:]),
+                             "week": weeks[i]})
+    if not rows:
+        return None
+
+    def stats(key, subset):
+        err = [abs(r[key] - r["actual"]) for r in subset]
+        xs, ys = [r[key] for r in subset], [r["actual"] for r in subset]
+        mx, my = mean(xs), mean(ys)
+        cov = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+        vx = math.sqrt(sum((x - mx) ** 2 for x in xs)) or 1
+        vy = math.sqrt(sum((y - my) ** 2 for y in ys)) or 1
+        return {"mae": mean(err), "corr": cov / (vx * vy)}
+    out = {"n": len(rows), "by_pos": {}}
+    for label, subset in [("All", rows)] + [(p, [r for r in rows if r["pos"] == p]) for p in FANTASY_POS]:
+        if len(subset) >= 10:
+            out["by_pos"][label] = {k: stats(k, subset) for k in ("model", "ppg", "last3")}
+            out["by_pos"][label]["n"] = len(subset)
+    return out
 
 
 # ------------------------------------------------------------------------------------
