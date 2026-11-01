@@ -169,7 +169,17 @@ div[data-testid="stDataFrame"] {{border: 1px solid {BORDER}; border-radius: 12px
 .fr-grp {{display: flex; justify-content: space-between; align-items: baseline; margin: .7rem .2rem .25rem;
          font-size: .68rem; text-transform: uppercase; letter-spacing: .09em; color: {MUTED};}}
 .fr-grp b {{color: {TEXT}; font-weight: 800;}}
-.fr-pl {{display: flex; align-items: center; gap: .6rem; padding: .45rem .3rem; border-bottom: 1px solid {BORDER}55;}}
+.fr-grp b em {{font-style: normal; color: {MUTED}; font-weight: 700; margin-left: .35rem; letter-spacing: .05em;}}
+.fr-grp .cols {{display: flex; gap: .2rem;}}
+.fr-grp .cols i {{font-style: normal; min-width: 48px; text-align: right; font-size: .58rem; letter-spacing: .1em;
+                 color: {MUTED}; font-weight: 800;}}
+.fr-pl.bye {{opacity: .55;}}
+.fr-strip {{display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .7rem; font-size: .8rem; color: {MUTED};
+           background: {CARD}; border: 1px solid {BORDER}; border-radius: 10px; padding: .45rem .75rem; margin-bottom: .6rem;}}
+.fr-strip-k {{font-size: .62rem; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; color: {TEXT};
+             margin-right: .45rem;}}
+.fr-strip-sep {{width: 1px; height: 14px; background: {BORDER};}}
+.fr-pl {{display: flex; align-items: center; gap: .6rem; padding: .36rem .3rem; border-bottom: 1px solid {BORDER}55;}}
 .fr-pl:last-child {{border-bottom: none;}}
 .fr-pl.ir {{opacity: .72;}}
 .fr-pl-main {{flex: 1; min-width: 0;}}
@@ -348,7 +358,7 @@ def styled_df(df, row_bg=None, cell=None, height=None, **kw):
 # Data (cached on the server, shared by every visit)
 # ------------------------------------------------------------------------------------
 
-DATA_VERSION = 6  # bump whenever player_report.py changes what a Season holds, so stale cached data is dropped
+DATA_VERSION = 7  # bump whenever player_report.py changes what a Season holds, so stale cached data is dropped
 
 
 def preset_scoring(fmt_name):
@@ -1215,7 +1225,7 @@ def page_defense(S):
 
 DEFAULT_SLOTS = {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "FLEX": 1, "SUPERFLEX": 0}
 SLOT_ELIG = {"QB": {"QB"}, "RB": {"RB"}, "WR": {"WR"}, "TE": {"TE"}, "FLEX": {"RB", "WR", "TE"},
-             "SUPERFLEX": {"QB", "RB", "WR", "TE"}}
+             "SUPERFLEX": {"QB", "RB", "WR", "TE"}, "K": {"K"}, "DEF": {"DEF"}}
 SLOT_LABEL = {"FLEX": "W/R/T", "SUPERFLEX": "Q/W/R/T"}
 MAX_TEAMS, MAX_ROSTER = 12, 30
 COOKIE = "fr_session"
@@ -1719,7 +1729,7 @@ class SessionStore:
 # ------------------------------------------------------------------------------------
 
 def slot_list(slots):
-    order = ["QB", "RB", "WR", "TE", "FLEX", "SUPERFLEX"]
+    order = ["QB", "RB", "WR", "TE", "FLEX", "SUPERFLEX", "K", "DEF"]
     return [s for s in order for _ in range(int(slots.get(s, 0) or 0))]
 
 
@@ -1742,6 +1752,8 @@ def optimal_lineup(projs, slots):
         if pick:
             used.add(pick["pid"])
     bench = [p for p in avail if p["pid"] not in used]
+    order = ["QB", "RB", "WR", "TE", "FLEX", "SUPERFLEX", "K", "DEF"]
+    lineup.sort(key=lambda l: order.index(l["slot"]) if l["slot"] in order else 99)
     return lineup, bench
 
 
@@ -1783,15 +1795,9 @@ def analyze_team(S, team, owner_of=None, my_team_id=None):
                 upside = s_ if s_["ceiling"] >= b["ceiling"] else b
                 out["close"].append({"slot": l["slot"], "start": s_, "bench": b, "safer": safer, "upside": upside})
                 break
-    for p in starters:
-        if p.get("inj_status"):
-            out["alerts"].append(("down", f"{p['name']} is listed {p['inj_status']}. Check before kickoff and have "
-                                          f"a backup ready."))
-    for p in projs.values():
-        if p and p["bye"]:
-            out["alerts"].append(("info", f"{p['name']} is on bye in week {week}."))
-        elif p and p["injf"] == 0:
-            out["alerts"].append(("down", f"{p['name']} is {p['inj_status']} and projects for 0."))
+    out["bye_names"] = [p["name"] for p in projs.values() if p and p["bye"]]
+    out["inj_list"] = [(p["name"], (p.get("inj_status") or "").split(" (")[0], p["injf"] == 0)
+                       for p in projs.values() if p and p.get("inj_status") and not p["bye"]]
 
     # Position grades vs an average starter in a league this size
     total_mine, total_avg = 0.0, 0.0
@@ -2262,7 +2268,10 @@ def norm_slot_pos(p):
 
 def make_entry(S, gid, name=None, pos=None, team=None, slot="BN", status=None):
     p = S.players.get(gid) if gid else None
-    return {"gid": gid, "name": name or (p or {}).get("name") or "Unknown player",
+    pos_n = norm_slot_pos(pos) or (p or {}).get("pos")
+    tm = team or (pr.player_team(S, gid) if gid else None)
+    return {"gid": gid, "key": gid or (f"DST:{tm}" if pos_n == "DEF" and tm else None),
+            "name": name or (p or {}).get("name") or "Unknown player",
             "pos": norm_slot_pos(pos) or (p or {}).get("pos"),
             "team": team or (pr.player_team(S, gid) if gid else None), "slot": slot,
             "status": (str(status).strip().title()[:14] if status and str(status).upper() not in ("ACTIVE", "NORMAL", "")
@@ -2276,8 +2285,40 @@ def team_from_entries(t):
     t["players"] = list(dict.fromkeys(e["gid"] for e in fant))
     t["active"] = list(dict.fromkeys(e["gid"] for e in fant if e["slot"] not in ("IR", "TAXI")))
     t["starters"] = [e["gid"] for e in fant if e["slot"] in STARTING]
-    t["unmatched"] = sum(1 for e in es if not e.get("gid") and e.get("pos") not in ("DEF",))
+    t["unmatched"] = sum(1 for e in es if not entry_key(e))
+    t["kdef"] = list(dict.fromkeys(entry_key(e) for e in es if e.get("pos") in ("K", "DEF") and entry_key(e)
+                                   and e["slot"] not in ("IR", "TAXI")))
     return t
+
+
+def entry_key(e):
+    """Projection key for a roster entry: gsis id for players and kickers, DST:<team> for defenses."""
+    if e.get("key"):
+        return e["key"]
+    if e.get("gid"):
+        return e["gid"]
+    if e.get("pos") == "DEF" and e.get("team"):
+        return f"DST:{e['team']}"
+    return None
+
+
+def project_any(S, key, week=None):
+    if not key:
+        return None
+    if str(key).startswith("DST:"):
+        return pr.project_kdef(S, "DEF", key[4:], week)
+    p = S.players.get(key) or {}
+    if p.get("pos") == "K" or (key in S.k_team and key not in S.season_tot):
+        return pr.project_kdef(S, "K", key, week)
+    return pr.project_player(S, key, week)
+
+
+def ros_any(S, key):
+    if str(key).startswith("DST:"):
+        return pr.ros_kdef(S, "DEF", key[4:])
+    if (S.players.get(key) or {}).get("pos") == "K":
+        return pr.ros_kdef(S, "K", key)
+    return pr.ros_value(S, key)
 
 
 def slots_from_entries(entries):
@@ -2296,11 +2337,21 @@ SCORING_FIELDS = [("pass_yd", "Passing yards (points per yard)", 0.04), ("pass_t
                   ("te_rec", "TE premium (extra per TE catch)", 0.0), ("rec_yd", "Receiving yards (per yard)", 0.1),
                   ("rec_td", "Receiving TD", 6.0), ("fum_lost", "Fumble lost", -2.0), ("two_pt", "2-point conversion", 2.0),
                   ("st_td", "Return TD", 6.0)]
+K_FIELDS = [("fg_0_39", "FG made, 0-39 yds", 3.0), ("fg_40_49", "FG made, 40-49 yds", 4.0),
+            ("fg_50p", "FG made, 50+ yds", 5.0), ("fg_miss", "FG missed", 0.0), ("xp", "Extra point made", 1.0),
+            ("xp_miss", "Extra point missed", 0.0)]
+DST_FIELDS = [("dst_sack", "Sack", 1.0), ("dst_int", "Interception", 2.0), ("dst_fr", "Fumble recovery", 2.0),
+              ("dst_td", "Defensive / return TD", 6.0), ("dst_safety", "Safety", 2.0),
+              ("pa_0", "0 points allowed", 10.0), ("pa_1_6", "1-6 points allowed", 7.0),
+              ("pa_7_13", "7-13 points allowed", 4.0), ("pa_14_20", "14-20 points allowed", 1.0),
+              ("pa_21_27", "21-27 points allowed", 0.0), ("pa_28_34", "28-34 points allowed", -1.0),
+              ("pa_35p", "35+ points allowed", -4.0)]
+ALL_SCORING_FIELDS = SCORING_FIELDS + K_FIELDS + DST_FIELDS
 
 
 def clean_scoring(sc):
     out = {}
-    for k, _, d in SCORING_FIELDS:
+    for k, _, d in ALL_SCORING_FIELDS:
         try:
             out[k] = round(float(sc.get(k, d)), 4)
         except (TypeError, ValueError):
@@ -2338,15 +2389,27 @@ def sleeper_scoring(ss):
                           "rush_yd": v("rush_yd", d=0.1), "rush_td": v("rush_td", d=6), "rec": v("rec", d=0),
                           "te_rec": v("bonus_rec_te", d=0), "rec_yd": v("rec_yd", d=0.1), "rec_td": v("rec_td", d=6),
                           "fum_lost": v("fum_lost", d=-2), "two_pt": v("rec_2pt", "rush_2pt", "pass_2pt", d=2),
-                          "st_td": v("st_td", "kr_td", "pr_td", d=6)})
+                          "st_td": v("st_td", "kr_td", "pr_td", d=6),
+                          "fg_0_39": v("fgm_30_39", "fgm_20_29", "fgm_0_19", "fgm", d=3), "fg_40_49": v("fgm_40_49", d=4),
+                          "fg_50p": v("fgm_50p", "fgm_50_59", d=5), "fg_miss": v("fgmiss", "fgmiss_30_39", d=0),
+                          "xp": v("xpm", d=1), "xp_miss": v("xpmiss", d=0),
+                          "dst_sack": v("sack", d=1), "dst_int": v("int", d=2), "dst_fr": v("fum_rec", d=2),
+                          "dst_td": v("def_td", "def_st_td", d=6), "dst_safety": v("safe", d=2),
+                          "pa_0": v("pts_allow_0", d=10), "pa_1_6": v("pts_allow_1_6", d=7),
+                          "pa_7_13": v("pts_allow_7_13", d=4), "pa_14_20": v("pts_allow_14_20", d=1),
+                          "pa_21_27": v("pts_allow_21_27", d=0), "pa_28_34": v("pts_allow_28_34", d=-1),
+                          "pa_35p": v("pts_allow_35p", d=-4)})
 
 
 ESPN_STATS = {3: "pass_yd", 4: "pass_td", 20: "int", 24: "rush_yd", 25: "rush_td", 53: "rec", 42: "rec_yd",
-              43: "rec_td", 72: "fum_lost", 44: "two_pt", 101: "st_td", 102: "st_td"}
+              43: "rec_td", 72: "fum_lost", 44: "two_pt", 101: "st_td", 102: "st_td",
+              80: "fg_0_39", 77: "fg_40_49", 74: "fg_50p", 85: "fg_miss", 86: "xp", 88: "xp_miss",
+              99: "dst_sack", 95: "dst_int", 96: "dst_fr", 94: "dst_td", 98: "dst_safety",
+              89: "pa_0", 90: "pa_1_6", 91: "pa_7_13", 92: "pa_14_20", 124: "pa_21_27", 125: "pa_28_34", 126: "pa_35p"}
 
 
 def espn_scoring(items):
-    sc = {k: d for k, _, d in SCORING_FIELDS}
+    sc = {k: d for k, _, d in ALL_SCORING_FIELDS}
     sc.update(rec=0, pass_td=4, int=-2)  # ESPN defaults when a category is absent
     for it in items or []:
         key = ESPN_STATS.get(it.get("statId"))
@@ -2359,32 +2422,62 @@ def espn_scoring(items):
     return clean_scoring(sc)
 
 
-YAHOO_SCORE_LABELS = [("passing yards", "pass_yd"), ("passing touchdowns", "pass_td"), ("interceptions", "int"),
+YAHOO_SCORE_LABELS = [("passing yards", "pass_yd"), ("passing touchdowns", "pass_td"),
                       ("rushing yards", "rush_yd"), ("rushing touchdowns", "rush_td"), ("receptions", "rec"),
                       ("receiving yards", "rec_yd"), ("receiving touchdowns", "rec_td"), ("fumbles lost", "fum_lost"),
-                      ("2-point conversions", "two_pt"), ("return touchdowns", "st_td")]
+                      ("2-point conversions", "two_pt"), ("return touchdowns", "st_td"),
+                      ("point after attempt made", "xp"), ("point after attempt missed", "xp_miss"),
+                      ("field goals missed", "fg_miss"), ("sack", "dst_sack"), ("fumble recovery", "dst_fr"),
+                      ("safety", "dst_safety"), ("touchdown", "dst_td")]
+
+
+def _yahoo_num(val):
+    m = re.search(r"(-?\d+(?:\.\d+)?)\s*yards?\s*per\s*point", val)
+    if m and float(m.group(1)):
+        return 1 / float(m.group(1))
+    m = re.search(r"-?\d+(?:\.\d+)?", val)
+    return float(m.group(0)) if m else None
 
 
 def yahoo_scoring(rows):
-    """rows: [label, value] pairs read from the Yahoo league settings page."""
-    found = {}
+    """rows: [label, value] pairs read from the Yahoo league settings page (offense, then K, then DEF)."""
+    found, int_seen = {}, 0
     for row in rows or []:
         if not isinstance(row, (list, tuple)) or len(row) < 2:
             continue
         label, val = str(row[0]).strip().lower(), str(row[1]).strip().lower()
-        key = next((k for lab, k in YAHOO_SCORE_LABELS if label == lab or label.startswith(lab)), None)
-        if not key or key in found:
-            continue  # first match wins (offense is listed before defense)
-        m = re.search(r"(-?\d+(?:\.\d+)?)\s*yards?\s*per\s*point", val)
-        if m and float(m.group(1)):
-            found[key] = 1 / float(m.group(1))
+        n = _yahoo_num(val)
+        if n is None:
             continue
-        m = re.search(r"-?\d+(?:\.\d+)?", val)
+        if label.startswith("interception"):
+            found.setdefault("int" if int_seen == 0 else "dst_int", n)
+            int_seen += 1
+            continue
+        m = re.match(r"field goals? (\d+)\s*[-–]\s*(\d+)", label)
         if m:
-            found[key] = float(m.group(0))
-    if len(found) < 4:
+            lo = int(m.group(1))
+            key = "fg_0_39" if lo < 40 else "fg_40_49" if lo < 50 else "fg_50p"
+            if key == "fg_0_39":
+                found["fg_0_39"] = n  # the 30-39 row (listed last of the short ones) wins
+            else:
+                found.setdefault(key, n)
+            continue
+        if re.match(r"field goals? (50|50\+)", label):
+            found.setdefault("fg_50p", n)
+            continue
+        m = re.match(r"points allowed (\d+)(?:\s*[-–]\s*(\d+))?", label)
+        if m:
+            lo = int(m.group(1))
+            key = "pa_0" if lo == 0 and not m.group(2) else "pa_1_6" if lo <= 6 else "pa_7_13" if lo <= 13 else \
+                "pa_14_20" if lo <= 20 else "pa_21_27" if lo <= 27 else "pa_28_34" if lo <= 34 else "pa_35p"
+            found.setdefault(key, n)
+            continue
+        key = next((k for lab, k in YAHOO_SCORE_LABELS if label == lab or label.startswith(lab)), None)
+        if key:
+            found.setdefault(key, n)
+    if len([k for k in found if k in dict((f[0], 1) for f in SCORING_FIELDS)]) < 4:
         return None
-    return clean_scoring({**{k: d for k, _, d in SCORING_FIELDS}, "int": -1, "rec": 0.5, **found})
+    return clean_scoring({**{k: d for k, _, d in ALL_SCORING_FIELDS}, "int": -1, "rec": 0.5, **found})
 
 
 # ----- Sleeper -----
@@ -2578,11 +2671,12 @@ def league_from_sync(S, payload):
     raise ValueError("Unknown sync source.")
 
 
-BOOKMARK_VERSION = 4
+BOOKMARK_VERSION = 5
+LINEUP_BOOKMARK_VERSION = 3  # older bookmarks didn't send lineup slots / K / DEF / IR
 BOOKMARKLET_JS = r"""(async()=>{const SITE='__SITE__';
 const b64=u=>{let s='';for(let i=0;i<u.length;i+=8192)s+=String.fromCharCode.apply(null,u.subarray(i,i+8192));return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')};
 const enc=async o=>{const raw=new TextEncoder().encode(JSON.stringify(o));try{const st=new Blob([raw]).stream().pipeThrough(new CompressionStream('deflate-raw'));return 'z'+b64(new Uint8Array(await new Response(st).arrayBuffer()))}catch(e){return b64(raw)}};
-const go=async o=>{o.v=4;const b=await enc(o);const u=SITE+'/?sync='+b;if(u.length<=7000){location.href=u;return}
+const go=async o=>{o.v=5;const b=await enc(o);const u=SITE+'/?sync='+b;if(u.length<=7000){location.href=u;return}
 const d=document.createElement('div');d.style.cssText='position:fixed;z-index:2147483647;top:20px;right:20px;width:380px;background:#121a2b;color:#e6edf3;border:2px solid #f5b301;border-radius:14px;padding:18px;font:14px sans-serif;box-shadow:0 10px 40px rgba(0,0,0,.5)';
 d.innerHTML='<b style="font-size:16px">Your league is ready</b><p style="color:#8b98ad;margin:8px 0 12px">It is too big to send in a link, so it goes through your clipboard.</p>';
 const bt=document.createElement('button');bt.textContent='Copy & open Fantasy Reports';bt.style.cssText='width:100%;padding:12px;border:0;border-radius:10px;background:#f5b301;color:#111;font-weight:800;font-size:15px;cursor:pointer';
@@ -2598,7 +2692,7 @@ const yr=q.get('seasonId')||new Date().getFullYear();
 const r=await fetch('https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/'+yr+'/segments/0/leagues/'+lid+'?view=mTeam&view=mRoster&view=mSettings&view=mMatchup',{credentials:'include'});
 if(!r.ok)return alert('ESPN returned '+r.status+'. Make sure you are logged in to ESPN.');
 const d=await r.json();const per=(d.status||{}).currentMatchupPeriod;const ss=d.settings||{};
-return go({src:'espn',league:lid,season:+yr,my:q.get('teamId'),data:{settings:{name:ss.name,rosterSettings:{lineupSlotCounts:(ss.rosterSettings||{}).lineupSlotCounts},scoringSettings:{scoringItems:((ss.scoringSettings||{}).scoringItems||[]).filter(i=>[3,4,19,20,24,25,26,42,43,44,53,72,101,102].includes(i.statId)).map(i=>({statId:i.statId,points:i.points,pointsOverrides:i.pointsOverrides}))}},
+return go({src:'espn',league:lid,season:+yr,my:q.get('teamId'),data:{settings:{name:ss.name,rosterSettings:{lineupSlotCounts:(ss.rosterSettings||{}).lineupSlotCounts},scoringSettings:{scoringItems:((ss.scoringSettings||{}).scoringItems||[]).filter(i=>[3,4,19,20,24,25,26,42,43,44,53,72,101,102,74,77,80,85,86,88,89,90,91,92,94,95,96,98,99,123,124,125,126,127].includes(i.statId)).map(i=>({statId:i.statId,points:i.points,pointsOverrides:i.pointsOverrides}))}},
 members:(d.members||[]).map(m=>({id:m.id,displayName:m.displayName})),status:{currentMatchupPeriod:per},
 schedule:(d.schedule||[]).filter(s=>s.matchupPeriodId==per).map(s=>({matchupPeriodId:s.matchupPeriodId,home:{teamId:(s.home||{}).teamId},away:{teamId:(s.away||{}).teamId}})),
 teams:(d.teams||[]).map(t=>({id:t.id,name:t.name||((t.location||'')+' '+(t.nickname||'')).trim(),owners:t.owners,record:{overall:((t.record||{}).overall)||{}},roster:{entries:((t.roster||{}).entries||[]).map(e=>{const pl=((e.playerPoolEntry||{}).player)||{};return {playerId:e.playerId,lineupSlotId:e.lineupSlotId,playerPoolEntry:{player:{fullName:pl.fullName,defaultPositionId:pl.defaultPositionId,proTeamId:pl.proTeamId,injuryStatus:pl.injuryStatus}}}})}}))}})}
@@ -2619,7 +2713,7 @@ if(!pl.length){doc.querySelectorAll('a[href*="/nfl/players/"]').forEach(a=>{cons
 if(mm&&t.length>3&&!seen.has(mm[1])){seen.add(mm[1]);pl.push([mm[1],t])}})}
 if(pl.length)teams.push({id:id,name:names[id]||('Team '+id),players:pl})}
 if(!teams.length)return alert('Could not read the rosters. Make sure you are logged in to Yahoo.');
-let sc=[];try{const sd=await get('/f1/'+lid+'/settings');sd.querySelectorAll('tr').forEach(tr=>{const c=tr.querySelectorAll('td,th');if(c.length>=2){const a=c[0].textContent.trim(),b=c[1].textContent.trim();if(a&&b&&a.length<50&&b.length<60&&/passing|rushing|receiving|reception|interception|fumble|2-point|return touchdown/i.test(a))sc.push([a,b])}});sc=sc.slice(0,40)}catch(e){}
+let sc=[];try{const sd=await get('/f1/'+lid+'/settings');sd.querySelectorAll('tr').forEach(tr=>{const c=tr.querySelectorAll('td,th');if(c.length>=2){const a=c[0].textContent.trim(),b=c[1].textContent.trim();if(a&&b&&a.length<50&&b.length<60&&/passing|rushing|receiving|reception|interception|fumble|2-point|touchdown|field goal|point after|sack|safety|points allowed/i.test(a))sc.push([a,b])}});sc=sc.slice(0,70)}catch(e){}
 return go({src:'yahoo',league:lid,name:((home.querySelector('title')||{}).textContent||'').split('|')[0].trim(),my:my,teams:teams,sc:sc})}
 alert('Open your league on Yahoo, ESPN or Sleeper first, then tap this bookmark.')
 }catch(e){alert('Sync failed: '+e.message)}})();"""
@@ -2728,6 +2822,10 @@ def inj_badge(status):
 
 def game_result(S, pid, week):
     """Actual fantasy points if his game this week is already final, else None."""
+    if str(pid).startswith("DST:"):
+        return pr.kdef_actual(S, "DEF", pid[4:], week)
+    if (S.players.get(pid) or {}).get("pos") == "K":
+        return pr.kdef_actual(S, "K", pid, week)
     team = pr.player_team(S, pid)
     gm = pr.team_game(S, team, week) if (team and week) else None
     if not gm or gm["home_score"] is None:
@@ -2768,22 +2866,26 @@ def kdef_hint(S, e, week):
 
 
 def pts_cell(S, e, p, week):
-    """Two numbers on every row: PROJ (projected this week) and FINAL (actual, once his game is over)."""
-    dash = '<b class="na">–</b>'
-    if e.get("pos") in ("K", "DEF") or not e.get("gid"):
-        proj, fin = dash, dash
-    else:
-        proj = f'<b>{p["proj"]:.1f}</b>' if p else dash
-        f = game_result(S, e["gid"], week)
-        fin = f'<b class="fin">{f:.1f}</b>' if f is not None else dash
-    return (f'<div class="fr-pts2"><div><span>PROJ</span>{proj}</div>'
-            f'<div><span>FINAL</span>{fin}</div></div>')
+    """PROJ and FINAL numbers; the column labels sit once in each section header."""
+    dash = '<b class="na">·</b>'
+    key = entry_key(e)
+    proj = f'<b>{p["proj"]:.1f}</b>' if p else dash
+    f = game_result(S, key, week) if key else None
+    fin = f'<b class="fin">{f:.1f}</b>' if f is not None else dash
+    return f'<div class="fr-pts2"><div>{proj}</div><div>{fin}</div></div>'
+
+
+def grp_header(title, total=None):
+    t = f' <em>{total:.1f} proj</em>' if total is not None else ""
+    return (f'<div class="fr-grp"><b>{title}{t}</b><span class="cols"><i>PROJ</i><i>FINAL</i></span></div>')
 
 
 def player_line(S, e, p, week, badge=""):
     slot = e["slot"]
     if e.get("pos") in ("K", "DEF") or not e.get("gid"):
         lab, hint, hcol = kdef_hint(S, e, week) if e.get("pos") in ("K", "DEF") else ("", "Not matched", MUTED)
+        if p and p.get("bye"):
+            hint, hcol = "BYE", RED
         name = esc(e["name"])
         meta = f'{esc(e.get("pos") or "")} · {esc(e.get("team") or "")}{" · " + esc(lab) if lab else ""}'
         extra = f' · <span style="color:{hcol}">{esc(hint)}</span>' if hint else ""
@@ -2798,7 +2900,8 @@ def player_line(S, e, p, week, badge=""):
         if p and p["bye"]:
             extra = f' · <span style="color:{RED}">BYE</span>'
     st_ = e.get("status") or ((p or {}).get("inj_status") or "").split(" (")[0]
-    return (f'<div class="fr-pl{" ir" if slot == "IR" else ""}">{slot_pill(slot, e.get("pos"))}{logo(e.get("team"), 26)}'
+    dim = " ir" if slot == "IR" else " bye" if (p and p.get("bye")) else ""
+    return (f'<div class="fr-pl{dim}">{slot_pill(slot, e.get("pos"))}{logo(e.get("team"), 26)}'
             f'<div class="fr-pl-main"><div class="fr-pl-name">{name}{inj_badge(st_)}{badge}</div>'
             f'<div class="fr-pl-meta">{meta}{extra}</div></div>{pts_cell(S, e, p, week)}</div>')
 
@@ -2831,18 +2934,23 @@ def resolve_entries(S, t):
 
 
 def lineup_moves(S, entries, rec_lineup, projs):
-    act = [e["gid"] for e in entries if e["slot"] in STARTING and e.get("gid") and e["gid"] in projs]
+    act = [entry_key(e) for e in entries if e["slot"] in STARTING and entry_key(e) in projs]
     rec = [l["p"]["pid"] for l in rec_lineup if l["p"]]
-    start = sorted([projs[g] for g in rec if g not in act], key=lambda p: -p["proj"])
+    start = sorted([projs[g] for g in rec if g not in act and g in projs], key=lambda p: -p["proj"])
     sit = sorted([projs[g] for g in act if g not in rec], key=lambda p: p["proj"])
     moves, used = [], set()
     for s_ in start:
         partner = next((x for x in sit if x["pid"] not in used and x["pos"] == s_["pos"]), None) or \
-            next((x for x in sit if x["pid"] not in used), None)
+            next((x for x in sit if x["pid"] not in used and x["pos"] not in ("K", "DEF")
+                  and s_["pos"] not in ("K", "DEF")), None)
         if partner:
             used.add(partner["pid"])
         moves.append({"start": s_, "sit": partner, "gain": s_["proj"] - (partner["proj"] if partner else 0)})
     return moves
+
+
+def set_total_of(es, projs):
+    return sum(projs[entry_key(e)]["proj"] for e in es if e["slot"] in STARTING and entry_key(e) in projs)
 
 
 def team_card_html(S, t, T, week, rank, accent, is_me, n_teams):
@@ -2852,20 +2960,21 @@ def team_card_html(S, t, T, week, rank, accent, is_me, n_teams):
     has_slots = any(e["slot"] in STARTING for e in es)
     rec = t.get("record")
     rec_txt = f"{rec[0]}-{rec[1]}{'-' + str(rec[2]) if rec[2] else ''}" if rec else ""
-    set_total = sum(projs[e["gid"]]["proj"] for e in es if e["slot"] in STARTING and e.get("gid") in projs)
+    set_total = set_total_of(es, projs)
     grades = "".join(f'<span class="fr-grade" style="color:{T["grades"][p]["grade"][1]};border-color:'
                      f'{T["grades"][p]["grade"][1]}55">{p} {T["grades"][p]["grade"][0]}</span>'
                      for p in pr.FANTASY_POS if p in T["grades"])
+    you = ' <span class="fr-you">YOU</span>' if is_me else ""
 
     def badge(e):
-        if not has_slots or not e.get("gid") or e["gid"] not in projs:
+        k = entry_key(e)
+        if not has_slots or k not in projs:
             return ""
-        if e["slot"] in STARTING and e["gid"] not in rec_ids:
+        if e["slot"] in STARTING and k not in rec_ids:
             return '<span class="fr-tag sit">SIT?</span>'
-        if e["slot"] in ("BN",) and e["gid"] in rec_ids:
+        if e["slot"] == "BN" and k in rec_ids:
             return '<span class="fr-tag start">START?</span>'
         return ""
-    you = ' <span class="fr-you">YOU</span>' if is_me else ""
     body = []
     groups = [("Starters", "start"), ("Bench", "bench"), ("Injured reserve", "ir")] if has_slots else \
         [("Roster", "bench"), ("Injured reserve", "ir")]
@@ -2873,11 +2982,8 @@ def team_card_html(S, t, T, week, rank, accent, is_me, n_teams):
         rows = ordered_entries(es, g_)
         if not rows:
             continue
-        sub = ""
-        if g_ == "start":
-            sub = f'<span>{set_total:.1f} proj</span>'
-        body.append(f'<div class="fr-grp"><b>{title}</b>{sub}</div>')
-        body += [player_line(S, e, projs.get(e.get("gid")), week, badge(e)) for e in rows]
+        body.append(grp_header(title, set_total if g_ == "start" else None))
+        body += [player_line(S, e, projs.get(entry_key(e)), week, badge(e)) for e in rows]
     head = (f'<div class="fr-tc-head" style="background:linear-gradient(120deg,{accent}33 0%,{accent}0d 60%,transparent);'
             f'border-bottom:1px solid {accent}44">'
             f'<div class="fr-rank-badge" style="background:{accent};">{rank}</div>'
@@ -2895,92 +3001,84 @@ def lineup_compare(S, t, T, week, slots):
     projs = T["projs"]
     has_slots = any(e["slot"] in STARTING for e in es)
     rec_total = T["total"]
-    if not has_slots:
-        H(notes_html([("info", "This sync didn't include the lineup you set, so only the recommended lineup is shown. "
-                               "Re-sync (or click the updated bookmark) to compare.")]))
-    set_total = sum(projs[e["gid"]]["proj"] for e in es if e["slot"] in STARTING and e.get("gid") in projs)
+    set_total = set_total_of(es, projs)
     moves = lineup_moves(S, es, T["lineup"], projs) if has_slots else []
     gain = rec_total - set_total if has_slots else 0
+    if not has_slots:
+        H(notes_html([("info", "This sync didn't include the lineup you set, so only the recommended lineup is shown. "
+                               "Re-sync to compare.")]))
     cards = []
     if has_slots:
-        cards.append(kpi("Your set lineup", f"{set_total:.1f}", f"projected · week {week}", BLUE))
-    cards.append(kpi("Recommended lineup", f"{rec_total:.1f}", "projected · best by projection", GOLD))
+        cards.append(kpi("Your lineup", f"{set_total:.1f}", f"projected · week {week}", BLUE))
+    cards.append(kpi("Recommended", f"{rec_total:.1f}", "projected · best possible", GOLD))
     if has_slots:
-        cards.append(kpi("Points gained by changing", f"{gain:+.1f}", f"{len(moves)} move{'s' if len(moves) != 1 else ''}"
-                         if moves else "Your lineup is already optimal", GREEN if gain >= 0.5 else BORDER,
-                         GREEN if gain >= 0.5 else TEXT))
-    flagged = [e for e in es if e["slot"] in STARTING and e.get("gid") in projs and
-               (projs[e["gid"]]["bye"] or projs[e["gid"]].get("injf") == 0)]
-    cards.append(kpi("Starters out or on bye", str(len(flagged)), ", ".join(e["name"] for e in flagged) or "None",
-                     RED if flagged else BORDER, RED if flagged else TEXT))
-    H(f'<div class="fr-grid">{"".join(cards)}</div>')
+        cards.append(kpi("Gain from changes", f"{gain:+.1f}",
+                         f"{len(moves)} move{'s' if len(moves) != 1 else ''} below" if moves else "Already optimal",
+                         GREEN if gain >= 0.5 else BORDER, GREEN if gain >= 0.5 else TEXT))
+    H(f'<div class="fr-grid g3">{"".join(cards)}</div>')
     if moves:
-        sec("Suggested lineup changes")
+        sec("Suggested changes")
         items = []
         for mv in moves:
             s_, o = mv["start"], mv["sit"]
+            nm = (lambda p: esc(p["name"]) if p.get("kdef") else plink(p["pid"], p["name"]))
             items.append(f'<div class="fr-move"><div class="fr-move-side in"><span class="fr-tag start">START</span>'
-                         f'{logo(s_["team"], 22)} {plink(s_["pid"], s_["name"])} <span class="fr-dim">{s_["pos"]} · '
-                         f'{s_["proj"]:.1f} proj</span></div><div class="fr-move-arrow">⇄</div>'
-                         f'<div class="fr-move-side out"><span class="fr-tag sit">BENCH</span>'
-                         + (f'{logo(o["team"], 22)} {plink(o["pid"], o["name"])} <span class="fr-dim">{o["pos"]} · '
-                            f'{o["proj"]:.1f} proj</span>' if o else '<span class="fr-dim">open slot</span>')
+                         f'{logo(s_["team"], 22)} {nm(s_)} <span class="fr-dim">{s_["pos"]} · {s_["proj"]:.1f}</span></div>'
+                         f'<div class="fr-move-arrow">⇄</div><div class="fr-move-side out"><span class="fr-tag sit">BENCH</span>'
+                         + (f'{logo(o["team"], 22)} {nm(o)} <span class="fr-dim">{o["pos"]} · {o["proj"]:.1f}</span>'
+                            if o else '<span class="fr-dim">open slot</span>')
                          + f'</div><div class="fr-move-gain">{mv["gain"]:+.1f}</div></div>')
         H("".join(items))
-    sec(f"Week {week}: your lineup vs. recommended")
     set_rows = ordered_entries(es, "start") if has_slots else []
+    by_key = {entry_key(e): e for e in es if entry_key(e)}
     rec_rows = []
     for l in T["lineup"]:
         p = l["p"]
         if p:
-            e = next((x for x in es if x.get("gid") == p["pid"]), None) or make_entry(S, p["pid"])
+            e = by_key.get(p["pid"]) or make_entry(S, p["pid"] if not p.get("kdef") or p["pos"] == "K" else None,
+                                                   p["name"], p["pos"], p["team"])
             rec_rows.append({**e, "slot": l["slot"]})
         else:
-            rec_rows.append({"gid": None, "name": "Empty", "pos": None, "team": None, "slot": l["slot"],
+            rec_rows.append({"gid": None, "name": "Empty slot", "pos": None, "team": None, "slot": l["slot"],
                              "status": None})
-    rec_rows += [e for e in set_rows if e.get("pos") in ("K", "DEF")] or \
-        [e for e in es if e.get("pos") in ("K", "DEF")][: (slots.get("K", 0) + slots.get("DEF", 0))]
-    rec_ids = {r["gid"] for r in rec_rows if r.get("gid")}
-    set_ids = {r["gid"] for r in set_rows if r.get("gid")}
-    def lines(rows, badge_fn=None):
-        return "".join(player_line(S, e, projs.get(e.get("gid")), week, badge_fn(e) if badge_fn else "") for e in rows)
+    rec_ids = {entry_key(r) for r in rec_rows if entry_key(r)}
+    set_ids = {entry_key(r) for r in set_rows if entry_key(r)}
 
-    def group(title, total=None):
-        return (f'<div class="fr-grp"><b>{title}</b>' + (f"<span>{total:.1f} proj</span>" if total is not None else "")
-                + "</div>")
+    def lines(rows, badge_fn=None):
+        return "".join(player_line(S, e, projs.get(entry_key(e)), week, badge_fn(e) if badge_fn else "")
+                       for e in rows)
     ir_rows = ordered_entries(es, "ir")
+    left = ""
     if has_slots:
         bench_rows = ordered_entries(es, "bench")
-        left = (group("Starters", set_total) +
-                lines(set_rows, lambda e: '<span class="fr-tag sit">SIT?</span>' if e.get("gid") in projs and
-                      e["gid"] not in rec_ids else "") +
-                (group("Bench") + lines(bench_rows, lambda e: '<span class="fr-tag start">START?</span>'
-                                        if e.get("gid") in rec_ids else "") if bench_rows else "") +
-                (group("Injured reserve") + lines(ir_rows) if ir_rows else ""))
-    rec_bench = [{**e, "slot": "TAXI" if e["slot"] == "TAXI" else "BN"} for e in es
-                 if e["slot"] not in ("IR",) and e.get("gid") not in rec_ids and e.get("pos") not in ("K", "DEF")]
-    rec_bench = ordered_entries(rec_bench, "bench")
-    right = (group("Starters", rec_total) +
-             lines(rec_rows, lambda e: '<span class="fr-tag start">NEW</span>' if has_slots and e.get("gid") and
-                   e["gid"] not in set_ids else "") +
-             (group("Bench") + lines(rec_bench) if rec_bench else "") +
-             (group("Injured reserve") + lines(ir_rows) if ir_rows else ""))
+        left = (grp_header("Starters", set_total) +
+                lines(set_rows, lambda e: '<span class="fr-tag sit">SIT?</span>' if entry_key(e) in projs and
+                      entry_key(e) not in rec_ids else "") +
+                (grp_header("Bench") + lines(bench_rows, lambda e: '<span class="fr-tag start">START?</span>'
+                                             if entry_key(e) in rec_ids else "") if bench_rows else "") +
+                (grp_header("Injured reserve") + lines(ir_rows) if ir_rows else ""))
+    rec_bench = ordered_entries([{**e, "slot": "TAXI" if e["slot"] == "TAXI" else "BN"} for e in es
+                                 if e["slot"] != "IR" and entry_key(e) not in rec_ids], "bench")
+    right = (grp_header("Starters", rec_total) +
+             lines(rec_rows, lambda e: '<span class="fr-tag start">NEW</span>' if has_slots and entry_key(e) and
+                   entry_key(e) not in set_ids else "") +
+             (grp_header("Bench") + lines(rec_bench) if rec_bench else "") +
+             (grp_header("Injured reserve") + lines(ir_rows) if ir_rows else ""))
+    plat = esc(PLATFORM_LABEL.get(t.get("_platform"), "your site"))
     cols = (f'<div class="fr-tc" style="border-top:4px solid {BLUE}"><div class="fr-tc-head" style="background:'
             f'linear-gradient(120deg,{BLUE}26,transparent 70%)"><div style="flex:1"><div class="fr-tc-name">'
-            f'Your lineup</div><div class="fr-tc-sub">as currently set on {esc(PLATFORM_LABEL.get(t.get("_platform"), "your site"))}'
-            f'</div></div><div class="fr-tc-tot"><div class="v">{set_total:.1f}</div><div class="l">wk {week} proj</div>'
-            f'</div></div><div class="fr-tc-body">{left}</div></div>' if has_slots else "")
+            f'Your lineup</div><div class="fr-tc-sub">as set on {plat}</div></div><div class="fr-tc-tot">'
+            f'<div class="v">{set_total:.1f}</div><div class="l">wk {week} proj</div></div></div>'
+            f'<div class="fr-tc-body">{left}</div></div>' if has_slots else "")
     cols += (f'<div class="fr-tc" style="border-top:4px solid {GOLD}"><div class="fr-tc-head" style="background:'
              f'linear-gradient(120deg,{GOLD}26,transparent 70%)"><div style="flex:1"><div class="fr-tc-name">'
              f'Recommended</div><div class="fr-tc-sub">highest projection at every slot</div></div>'
              f'<div class="fr-tc-tot"><div class="v">{rec_total:.1f}</div><div class="l">wk {week} proj</div></div>'
              f'</div><div class="fr-tc-body">{right}</div></div>')
-    H(f'<div class="fr-grid g2">{cols}</div>')
-    st.caption("PROJ = projected fantasy points this week; FINAL = his game is over and this is what he scored. "
-               "Kickers and defenses aren't projected; their line shows the Vegas context instead (a defense wants "
-               "a low opponent implied total, a kicker wants a high team total). Recommended keeps your K and DEF "
-               "as set.")
-
+    H(f'<div style="height:.5rem"></div><div class="fr-grid g2">{cols}</div>')
+    st.caption("PROJ = projected points this week under this league's scoring (kickers and defenses included); "
+               "FINAL = his game is over. A defense's line shows what its opponent is expected to score; a kicker's "
+               "shows his own team's expected total.")
 
 
 def effective_scoring(league):
@@ -2994,18 +3092,20 @@ def league_settings_editor(store, owner, row, lg):
     st.markdown("**Scoring**")
     src = "You edited this." if lg.get("scoring_manual") else \
         (f"Synced from {lg['scoring_source']}." if lg.get("scoring_source") else "Not synced; please check it.")
-    st.caption(src + " Bonuses (100-yard games, long TDs) aren't modeled.")
+    st.caption(src + " Bonuses (100-yard games, long TDs) and yards-allowed defense scoring aren't modeled.")
     presets = {"Current": cur, "Standard": clean_scoring(preset_scoring("standard")),
                "Half-PPR": clean_scoring(preset_scoring("half")), "PPR": clean_scoring(preset_scoring("ppr")),
                "Half-PPR, 6-pt pass TD": clean_scoring({**preset_scoring("half"), "pass_td": 6})}
     pick = st.selectbox("Start from", list(presets), key=f"scp_{rid}")
     base = presets[pick]
     vals = {}
-    cols = st.columns(2)
-    for i, (k, lab, _) in enumerate(SCORING_FIELDS):
-        step = 0.01 if k.endswith("_yd") else 0.5
-        vals[k] = cols[i % 2].number_input(lab, value=float(base[k]), step=step, format="%.2f" if step < 0.5 else "%.1f",
-                                           key=f"sc_{k}_{rid}_{pick}")
+    for tab, fields in zip(st.tabs(["Offense", "Kicker", "Defense"]), [SCORING_FIELDS, K_FIELDS, DST_FIELDS]):
+        with tab:
+            cols = st.columns(2)
+            for i, (k, lab, _) in enumerate(fields):
+                step = 0.01 if k.endswith("_yd") else 0.5
+                vals[k] = cols[i % 2].number_input(lab, value=float(base[k]), step=step,
+                                                   format="%.2f" if step < 0.5 else "%.1f", key=f"sc_{k}_{rid}_{pick}")
     st.markdown("**Starting lineup**")
     sl = {**DEFAULT_SLOTS, **(lg.get("slots") or {})}
     new_slots = dict(sl)
@@ -3040,10 +3140,14 @@ def league_season(S, league, season):
 
 
 def team_strength(S, roster, slots, n_teams, week):
-    roster = [pid for pid in roster if pr.player_base(S, pid)]
-    projs = {pid: pr.project_player(S, pid, week) for pid in roster}
+    projs = {}
+    for key in roster:
+        p = project_any(S, key, week)
+        if p:
+            projs[key] = p
+    roster = list(projs)
     lineup, bench = optimal_lineup(projs, slots)
-    ros = {pid: pr.ros_value(S, pid) for pid in roster}
+    ros = {pid: ros_any(S, pid) for pid in roster}
     ros_projs = {pid: {**projs[pid], "proj": ros[pid]} for pid in roster if projs[pid]}
     ros_lineup, _ = optimal_lineup(ros_projs, slots)
     grades, surplus = {}, defaultdict(list)
@@ -3076,7 +3180,8 @@ def league_report(_S, key, _league):
     owner_of = {pid: t for t in league["teams"] for pid in t["players"]}
     out = {"week": week, "teams": {}, "owner_of": owner_of}
     for t in league["teams"]:
-        out["teams"][t["id"]] = team_strength(S, t.get("active") or t["players"], slots, n, week)
+        out["teams"][t["id"]] = team_strength(S, (t.get("active") or t["players"]) + (t.get("kdef") or []), slots, n,
+                                              week)
     my = league.get("my_team")
     if my and my in out["teams"]:
         me = next(t for t in league["teams"] if t["id"] == my)
@@ -3376,7 +3481,7 @@ def render_league(S, store, owner, row, season):
     c3.markdown('<div style="height:1.75rem"></div>', unsafe_allow_html=True)
     with c3.popover("⚙️ League settings", use_container_width=True):
         league_settings_editor(store, owner, row, lg)
-    outdated = lg["platform"] == "yahoo" and lg.get("bookmark_version", 1) < BOOKMARK_VERSION
+    outdated = lg["platform"] == "yahoo" and lg.get("bookmark_version", 1) < LINEUP_BOOKMARK_VERSION
     if not can_api and (st.session_state.get(f"_bm_open_{row['id']}") or outdated):
         site = site_url()
         H(f'<div class="fr-card" style="border-left:5px solid {GOLD};margin:.3rem 0 .6rem">'
@@ -3477,7 +3582,7 @@ def render_league(S, store, owner, row, season):
 
 def set_lineup_list(S, t, T):
     es = resolve_entries(S, t)
-    out = [{"slot": e["slot"], "p": T["projs"].get(e.get("gid")), "e": e} for e in ordered_entries(es, "start")]
+    out = [{"slot": e["slot"], "p": T["projs"].get(entry_key(e)), "e": e} for e in ordered_entries(es, "start")]
     return out
 
 
@@ -3536,6 +3641,7 @@ def render_matchup(S, lg, R, pick, tnames, week):
             else:
                 e = {**e, "slot": x["slot"]}
             lines.append(player_line(S, e, x["p"], week))
+        lines.insert(0, grp_header("Starters"))
         return (f'<div class="fr-tc" style="border-top:4px solid {accent}"><div class="fr-tc-head" style="background:'
                 f'linear-gradient(120deg,{accent}33 0%,transparent 70%)"><div style="flex:1;min-width:0">'
                 f'<div class="fr-tc-name">{esc(t["name"])}{you_tag if me else ""}</div>'
@@ -3549,8 +3655,8 @@ def render_matchup(S, lg, R, pick, tnames, week):
         L = card(tA, A, A["lineup"], a2, GOLD, True)
         Rr = card(tB, B, B["lineup"], b2, BLUE, False)
     H(f'<div style="height:.6rem"></div><div class="fr-grid g2">{L}{Rr}</div>')
-    st.caption("Win chance accounts for how much each starter's scoring swings week to week. PROJ = projected points; "
-               "FINAL = his game is already over. Kickers and defenses aren't projected and aren't in the totals.")
+    st.caption("Win chance accounts for how much each starter's scoring swings week to week, kickers and defenses "
+               "included. PROJ = projected points; FINAL = his game is already over.")
 
 
 def render_power(lg, R, pick, tnames):
@@ -4065,6 +4171,14 @@ def render_team(S, team, A, show_header=True, lineup_fn=None):
     tabs = st.tabs([f"📋 Week {week} lineup", "🔁 Trade ideas", "🗓️ Byes & schedule", "👥 Roster"])
     with tabs[0]:
         notes = list(A["alerts"])
+        strip = []
+        if A.get("bye_names"):
+            strip.append(f'<span class="fr-strip-k">Byes</span>' + " · ".join(esc(n) for n in A["bye_names"]))
+        if A.get("inj_list"):
+            strip.append(f'<span class="fr-strip-k">Injuries</span>' + " · ".join(
+                f'{esc(n)} {inj_badge(st_)}' for n, st_, out_ in A["inj_list"]))
+        if strip:
+            H('<div class="fr-strip">' + '<span class="fr-strip-sep"></span>'.join(strip) + "</div>")
         for c in A["close"]:
             if c["safer"]["pid"] != c["upside"]["pid"]:
                 notes.append(("info", f"Close call at {SLOT_LABEL.get(c['slot'], c['slot'])}: {c['start']['name']} "

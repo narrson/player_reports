@@ -71,6 +71,11 @@ SCORING = {
     "fum_lost": -2,
     "st_td": 6,                    # return touchdowns
     "te_rec": 0,                   # TE premium: extra points per TE reception
+    # Kickers
+    "fg_0_39": 3, "fg_40_49": 4, "fg_50p": 5, "fg_miss": 0, "xp": 1, "xp_miss": 0,
+    # Team defense / special teams
+    "dst_sack": 1, "dst_int": 2, "dst_fr": 2, "dst_td": 6, "dst_safety": 2,
+    "pa_0": 10, "pa_1_6": 7, "pa_7_13": 4, "pa_14_20": 1, "pa_21_27": 0, "pa_28_34": -1, "pa_35p": -4,
 }
 FANTASY_PLAYOFF_WEEKS = (15, 16, 17)
 BOOM_BUST = {"QB": (25, 12), "RB": (20, 8), "WR": (20, 8), "TE": (15, 6)}  # (boom at or above, bust below)
@@ -106,7 +111,8 @@ PBP_COLS = [
     "fumble_lost", "return_yards", "receiver_player_name", "rusher_player_name",
     "passer_player_name", "qb_dropback", "qb_scramble", "sack", "pass_attempt", "pass",
     "rush", "xpass", "wp", "score_differential", "half_seconds_remaining", "shotgun",
-    "no_huddle", "goal_to_go",
+    "no_huddle", "goal_to_go", "field_goal_result", "kick_distance", "extra_point_result", "kicker_player_id",
+    "td_team", "safety",
 ] + [c for c, _ in ROLE_COLS]
 
 XFP_KEYS = ["receptions_exp", "rec_yards_gained_exp", "rec_touchdown_exp", "rush_yards_gained_exp",
@@ -495,7 +501,7 @@ def load_season(S):
 # ------------------------------------------------------------------------------------
 
 SCORING_DEPENDENT = {"scoring", "fmt_name", "weekly", "season_tot", "pos_counts", "fpa", "fpa_avg", "xfp", "_pool",
-                     "_base", "_posproj", "weeks_played", "last_week", "min_games", "scoring_key"}
+                     "_base", "_posproj", "_kdef", "weeks_played", "last_week", "min_games", "scoring_key"}
 
 
 def scoring_key(sc):
@@ -549,7 +555,7 @@ def prepare_scoring(S):
     sc = S.scoring
     S.scoring_key = scoring_key(sc)
     S._pool = {}
-    for k in ("_base", "_posproj"):
+    for k in ("_base", "_posproj", "_kdef"):
         if hasattr(S, k):
             delattr(S, k)
     compute_xfp(S)
@@ -609,6 +615,47 @@ def prepare_scoring(S):
 
 
 def prepare_static(S):
+    # Kicker and team-defense event counts (scoring-independent; points are applied per league later)
+    S.k_games, S.k_team = defaultdict(Counter), {}
+    S.dst_for, S.dst_against = defaultdict(Counter), defaultdict(Counter)
+    for r in S.pbp:
+        wk, off, de = g(r, "week"), g(r, "posteam"), g(r, "defteam")
+        kid = g(r, "kicker_player_id")
+        if kid and wk is not None:
+            fg, xp = g(r, "field_goal_result"), g(r, "extra_point_result")
+            c = S.k_games[(kid, wk)]
+            if fg:
+                d = g(r, "kick_distance", 0) or 0
+                if fg == "made":
+                    c["fg_0_39" if d < 40 else "fg_40_49" if d < 50 else "fg_50p"] += 1
+                else:
+                    c["fg_miss"] += 1
+                S.k_team[kid] = off
+            elif xp:
+                c["xp" if xp == "good" else "xp_miss"] += 1
+                S.k_team[kid] = off
+        if not de or not off or wk is None:
+            continue
+        ev = Counter()
+        if num(r, "sack") == 1:
+            ev["dst_sack"] += 1
+        if num(r, "interception") == 1:
+            ev["dst_int"] += 1
+        if num(r, "fumble_lost") == 1:
+            ev["dst_fr"] += 1
+        if num(r, "touchdown") == 1 and g(r, "td_team") == de:
+            ev["dst_td"] += 1
+        if num(r, "safety") == 1:
+            ev["dst_safety"] += 1
+        if ev:
+            S.dst_for[(de, wk)].update(ev)
+            S.dst_against[(off, wk)].update(ev)
+    S.dst_pa = {}
+    for gm in S.schedule:
+        if gm["home_score"] is None:
+            continue
+        S.dst_pa[(gm["home"], gm["week"])] = gm["away_score"]
+        S.dst_pa[(gm["away"], gm["week"])] = gm["home_score"]
     for r in S.pbp:
         r["_ftn"] = S.ftn.get((r.get("game_id"), r.get("play_id")))
     S.snap_weeks = defaultdict(set)
@@ -1784,6 +1831,138 @@ def position_projections(S, pos, week=None):
         S._posproj[key] = sorted([p for p in (project_player(S, pid, week) for pid in pool) if p],
                                  key=lambda p: -p["proj"])
     return S._posproj[key]
+
+
+# ------------------------------------------------------------------------------------
+# Kickers and team defenses (projections use each league's own K / DEF scoring)
+# ------------------------------------------------------------------------------------
+
+K_KEYS = ["fg_0_39", "fg_40_49", "fg_50p", "fg_miss", "xp", "xp_miss"]
+DST_KEYS = ["dst_sack", "dst_int", "dst_fr", "dst_td", "dst_safety"]
+PA_TIERS = [(0, "pa_0"), (6, "pa_1_6"), (13, "pa_7_13"), (20, "pa_14_20"), (27, "pa_21_27"), (34, "pa_28_34"),
+            (999, "pa_35p")]
+
+
+def _sc(sc, k):
+    return float(sc.get(k, SCORING.get(k, 0)) or 0)
+
+
+def kicker_points(c, sc):
+    return sum(_sc(sc, k) * c.get(k, 0) for k in K_KEYS)
+
+
+def pa_points(pa, sc):
+    for top, key in PA_TIERS:
+        if pa <= top:
+            return _sc(sc, key)
+    return 0.0
+
+
+def dst_points(c, pa, sc):
+    return sum(_sc(sc, k) * c.get(k, 0) for k in DST_KEYS) + (pa_points(pa, sc) if pa is not None else 0.0)
+
+
+def _expected_pa_points(mu, sc, sd=9.5):
+    tot = wsum = 0.0
+    for x in range(0, 71):
+        w = math.exp(-0.5 * ((x - mu) / sd) ** 2)
+        tot += w * pa_points(x, sc)
+        wsum += w
+    return tot / wsum if wsum else 0.0
+
+
+def kdef_actual(S, kind, ident, week):
+    """FINAL points for a kicker (gsis id) or defense (team abbr) if that game is over."""
+    team = S.k_team.get(ident) if kind == "K" else ident
+    if kind == "K" and not team:
+        team = (S.players.get(ident) or {}).get("team")
+    gm = team_game(S, team, week) if team else None
+    if not gm or gm["home_score"] is None:
+        return None
+    if kind == "K":
+        return kicker_points(S.k_games.get((ident, week), Counter()), S.scoring)
+    return dst_points(S.dst_for.get((ident, week), Counter()), S.dst_pa.get((ident, week)), S.scoring)
+
+
+def _kdef_cache(S):
+    if not hasattr(S, "_kdef"):
+        sc = S.scoring
+        kg = defaultdict(list)
+        for (kid, wk), c in S.k_games.items():
+            kg[kid].append(kicker_points(c, sc))
+        all_k = [p for v in kg.values() for p in v]
+        dg, da = defaultdict(list), defaultdict(list)
+        for (t, wk), pa in S.dst_pa.items():
+            dg[t].append(sum(_sc(sc, k) * S.dst_for.get((t, wk), Counter()).get(k, 0) for k in DST_KEYS))
+            da[t].append(sum(_sc(sc, k) * S.dst_against.get((t, wk), Counter()).get(k, 0) for k in DST_KEYS))
+        S._kdef = {"k": kg, "k_avg": mean(all_k) or 7.5, "k_sd": (statistics.pstdev(all_k) if len(all_k) > 1 else 4.0),
+                   "d_for": dg, "d_against": da,
+                   "d_avg": mean([p for v in dg.values() for p in v]) or 4.0}
+    return S._kdef
+
+
+def project_kdef(S, kind, ident, week=None):
+    week = week or next_week(S)
+    C = _kdef_cache(S)
+    if kind == "K":
+        team = S.k_team.get(ident) or (S.players.get(ident) or {}).get("team")
+        name = (S.players.get(ident) or {}).get("name") or ident
+        hist = C["k"].get(ident, [])
+        base = (sum(hist) + C["k_avg"] * 3) / (len(hist) + 3)
+        sd = C["k_sd"]
+    else:
+        team, name = ident, f"{ident} Defense"
+        hist = C["d_for"].get(ident, [])
+        base = None
+        sd = 5.5
+    out = {"pid": f"DST:{ident}" if kind == "DEF" else ident, "name": name, "pos": kind, "team": team, "week": week,
+           "bye": False, "label": "", "opp": None, "implied": None, "fpa_rank": None, "fpa_n": None,
+           "inj_status": None, "injf": 1.0, "reasons": [], "kdef": True}
+    gm = team_game(S, team, week) if (team and week) else None
+    if not gm:
+        out.update(bye=True, proj=0.0, floor=0.0, ceiling=0.0, sd=0.0, label="BYE", boom_prob=0.0)
+        return out
+    home = gm["home"] == team
+    opp = gm["away"] if home else gm["home"]
+    out.update(opp=opp, home=home, label=f"{'vs' if home else '@'} {opp}")
+    imp_own = imp_opp = None
+    if gm["total"] is not None and gm["spread"] is not None:
+        h = (gm["total"] + gm["spread"]) / 2
+        imp_own, imp_opp = (h, gm["total"] - h) if home else (gm["total"] - h, h)
+    if kind == "K":
+        vf = _clamp(1 + 0.6 * ((imp_own or 22.5) / _week_implied_mean(S, week) - 1), 0.8, 1.2) if imp_own else 1.0
+        proj = base * vf
+        out["implied"] = imp_own
+        out["reasons"].append(("info", f"Averages {mean(hist) or 0:.1f} pts/game under your scoring "
+                                       f"({len(hist)} games)." if hist else "No kicks yet this season; league average used."))
+        if imp_own:
+            out["reasons"].append(("up" if vf > 1.02 else "down" if vf < 0.98 else "info",
+                                   f"Team implied total {imp_own:.1f} ({int(round((vf - 1) * 100)):+d}%)."))
+    else:
+        own = (sum(hist) + C["d_avg"] * 3) / (len(hist) + 3)
+        oh = C["d_against"].get(opp, [])
+        opp_give = (sum(oh) + C["d_avg"] * 3) / (len(oh) + 3)
+        events = 0.5 * own + 0.5 * opp_give
+        mu = imp_opp if imp_opp is not None else (mean([S.dst_pa.get((t, w)) for (t, w) in S.dst_pa if t == opp]) or 22)
+        pa_pts = _expected_pa_points(mu, S.scoring)
+        proj = events + pa_pts
+        out["implied"] = imp_opp
+        out["reasons"].append(("info", f"Sacks, turnovers and TDs: {events:.1f} expected (his defense {own:.1f}/game, "
+                                       f"{opp} gives up {opp_give:.1f}/game)."))
+        out["reasons"].append(("up" if pa_pts > 2 else "down" if pa_pts < 0 else "info",
+                               f"{opp} is expected to score {mu:.1f}, worth {(pa_pts + 0.0) if abs(pa_pts) >= 0.05 else 0.0:+.1f} in "
+                               f"points-allowed scoring."))
+    proj = max(0.0, proj)
+    out.update(proj=proj, floor=max(0.0, proj - 0.84 * sd), ceiling=proj + 0.84 * sd, sd=sd,
+               boom_prob=1 - _norm_cdf((15 - proj) / sd) if sd else 0.0)
+    return out
+
+
+def ros_kdef(S, kind, ident):
+    nw = next_week(S)
+    if not nw:
+        return 0.0
+    return sum(project_kdef(S, kind, ident, w)["proj"] for w in range(nw, FANTASY_PLAYOFF_WEEKS[-1] + 1))
 
 
 # ------------------------------------------------------------------------------------
