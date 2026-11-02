@@ -54,7 +54,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime
 from pathlib import Path
 
-ENGINE_VERSION = 8  # app.py checks this so the website and the engine always match
+ENGINE_VERSION = 9  # app.py checks this so the website and the engine always match
 
 # ================================ SETTINGS ==========================================
 # Edit these to match your league. Command-line flags override the first two.
@@ -73,11 +73,21 @@ SCORING = {
     "fum_lost": -2,
     "st_td": 6,                    # return touchdowns
     "te_rec": 0,                   # TE premium: extra points per TE reception
+    # Less common offense categories (0 = not used)
+    "pick6": 0, "pass_cmp": 0, "pass_inc": 0, "pass_att": 0, "pass_fd": 0, "rush_att": 0, "rush_fd": 0,
+    "rec_fd": 0, "rec_tgt": 0, "fum": 0, "fum_ret_td": 6, "ret_yd": 0,
+    # Bonuses (0 = not used)
+    "bonus_pass_300": 0, "bonus_pass_400": 0, "bonus_rush_100": 0, "bonus_rush_200": 0, "bonus_rec_100": 0,
+    "bonus_rec_200": 0, "bonus_td_40": 0,
     # Kickers
-    "fg_0_39": 3, "fg_40_49": 4, "fg_50p": 5, "fg_miss": 0, "xp": 1, "xp_miss": 0,
+    "fg_0_19": 3, "fg_20_29": 3, "fg_30_39": 3, "fg_40_49": 4, "fg_50p": 5,
+    "fgm_0_19": 0, "fgm_20_29": 0, "fgm_30_39": 0, "fgm_40_49": 0, "fgm_50p": 0, "xp": 1, "xp_miss": 0,
     # Team defense / special teams
-    "dst_sack": 1, "dst_int": 2, "dst_fr": 2, "dst_td": 6, "dst_safety": 2,
+    "dst_sack": 1, "dst_int": 2, "dst_fr": 2, "dst_td": 6, "dst_ret_td": 6, "dst_safety": 2, "dst_blk": 2,
+    "dst_xp_ret": 2, "dst_ret_yd": 0,
     "pa_0": 10, "pa_1_6": 7, "pa_7_13": 4, "pa_14_20": 1, "pa_21_27": 0, "pa_28_34": -1, "pa_35p": -4,
+    "ya_0_99": 0, "ya_100_199": 0, "ya_200_299": 0, "ya_300_349": 0, "ya_350_399": 0, "ya_400_449": 0,
+    "ya_450_499": 0, "ya_500_549": 0, "ya_550p": 0,
 }
 FANTASY_PLAYOFF_WEEKS = (15, 16, 17)
 BOOM_BUST = {"QB": (25, 12), "RB": (20, 8), "WR": (20, 8), "TE": (15, 6)}  # (boom at or above, bust below)
@@ -114,7 +124,8 @@ PBP_COLS = [
     "passer_player_name", "qb_dropback", "qb_scramble", "sack", "pass_attempt", "pass",
     "rush", "xpass", "wp", "score_differential", "half_seconds_remaining", "shotgun",
     "no_huddle", "goal_to_go", "field_goal_result", "kick_distance", "extra_point_result", "kicker_player_id",
-    "td_team", "safety",
+    "td_team", "safety", "return_team", "punt_blocked", "defensive_two_point_conv", "defensive_extra_point_conv",
+    "kickoff_attempt", "punt_attempt",
 ] + [c for c, _ in ROLE_COLS]
 
 XFP_KEYS = ["receptions_exp", "rec_yards_gained_exp", "rec_touchdown_exp", "rush_yards_gained_exp",
@@ -228,11 +239,23 @@ def fmt(v, kind):
 
 
 def fantasy_points(r, sc):
-    return (sc["pass_yd"] * r["pass_yds"] + sc["pass_td"] * r["pass_td"] + sc["int"] * r["ints"]
-            + sc["rush_yd"] * r["rush_yds"] + sc["rush_td"] * r["rush_td"]
-            + (sc["rec"] + (sc.get("te_rec", 0) if r.get("pos") == "TE" else 0)) * r["rec"]
-            + sc["rec_yd"] * r["rec_yds"] + sc["rec_td"] * r["rec_td"]
-            + sc["two_pt"] * r["two_pt"] + sc["fum_lost"] * r["fum_lost"] + sc["st_td"] * r["st_td"])
+    g_ = lambda k: sc.get(k, 0) or 0  # noqa: E731
+    v = lambda k: r.get(k, 0) or 0    # noqa: E731
+    pts = (sc["pass_yd"] * r["pass_yds"] + sc["pass_td"] * r["pass_td"] + sc["int"] * r["ints"]
+           + sc["rush_yd"] * r["rush_yds"] + sc["rush_td"] * r["rush_td"]
+           + (sc["rec"] + (g_("te_rec") if r.get("pos") == "TE" else 0)) * r["rec"]
+           + sc["rec_yd"] * r["rec_yds"] + sc["rec_td"] * r["rec_td"]
+           + sc["two_pt"] * r["two_pt"] + sc["fum_lost"] * r["fum_lost"] + sc["st_td"] * r["st_td"])
+    # less common categories
+    pts += (g_("pick6") * v("pick6") + g_("pass_cmp") * v("completions") + g_("pass_att") * v("attempts")
+            + g_("pass_inc") * max(0, v("attempts") - v("completions")) + g_("pass_fd") * v("pass_fd")
+            + g_("rush_att") * v("carries") + g_("rush_fd") * v("rush_fd") + g_("rec_fd") * v("rec_fd")
+            + g_("rec_tgt") * v("targets") + g_("fum") * v("fum") + g_("fum_ret_td") * v("fum_ret_td")
+            + g_("ret_yd") * v("ret_yds") + g_("bonus_td_40") * v("td40"))
+    pts += (g_("bonus_pass_300") * (v("pass_yds") >= 300) + g_("bonus_pass_400") * (v("pass_yds") >= 400)
+            + g_("bonus_rush_100") * (v("rush_yds") >= 100) + g_("bonus_rush_200") * (v("rush_yds") >= 200)
+            + g_("bonus_rec_100") * (v("rec_yds") >= 100) + g_("bonus_rec_200") * (v("rec_yds") >= 200))
+    return pts
 
 
 def opp_label(game_id, team):
@@ -352,6 +375,9 @@ def load_season(S):
                 "fum_lost": num(r, "sack_fumbles_lost") + num(r, "rushing_fumbles_lost")
                 + num(r, "receiving_fumbles_lost"),
                 "st_td": num(r, "special_teams_tds"),
+                "pass_fd": num(r, "passing_first_downs"), "rush_fd": num(r, "rushing_first_downs"),
+                "rec_fd": num(r, "receiving_first_downs"),
+                "fum": num(r, "sack_fumbles") + num(r, "rushing_fumbles") + num(r, "receiving_fumbles"),
             })
         return out
 
@@ -684,6 +710,9 @@ def prepare_scoring(S):
         if r0["pos"] not in FANTASY_POS or not r0["pid"] or r0["week"] is None:
             continue
         r = dict(r0)
+        ex = getattr(S, "extra", {}).get((r["pid"], r["week"]))
+        if ex:
+            r.update(ex)
         r["pts"] = fantasy_points(r, sc)
         S.weekly[r["pid"]].append(r)
     for rows in S.weekly.values():
@@ -738,38 +767,63 @@ def prepare_static(S):
     # Kicker and team-defense event counts (scoring-independent; points are applied per league later)
     S.k_games, S.k_team = defaultdict(Counter), {}
     S.dst_for, S.dst_against = defaultdict(Counter), defaultdict(Counter)
+    S.dst_ya = defaultdict(float)                      # yards allowed by each defense per game
+    S.extra = defaultdict(Counter)                     # per player-week: pick6, 40+ yd TDs, fumble return TDs
     for r in S.pbp:
         wk, off, de = g(r, "week"), g(r, "posteam"), g(r, "defteam")
+        if wk is None:
+            continue
         kid = g(r, "kicker_player_id")
-        if kid and wk is not None:
+        if kid:
             fg, xp = g(r, "field_goal_result"), g(r, "extra_point_result")
             c = S.k_games[(kid, wk)]
             if fg:
                 d = g(r, "kick_distance", 0) or 0
-                if fg == "made":
-                    c["fg_0_39" if d < 40 else "fg_40_49" if d < 50 else "fg_50p"] += 1
-                else:
-                    c["fg_miss"] += 1
+                band = "0_19" if d < 20 else "20_29" if d < 30 else "30_39" if d < 40 else "40_49" if d < 50 else "50p"
+                c[("fg_" if fg == "made" else "fgm_") + band] += 1
                 S.k_team[kid] = off
             elif xp:
                 c["xp" if xp == "good" else "xp_miss"] += 1
                 S.k_team[kid] = off
-        if not de or not off or wk is None:
+        pt = g(r, "play_type")
+        special = pt in ("kickoff", "punt") or num(r, "kickoff_attempt") == 1 or num(r, "punt_attempt") == 1
+        rt = g(r, "return_team")
+        if special and rt:
+            ry = g(r, "return_yards")
+            if ry:
+                S.dst_for[(rt, wk)]["dst_ret_yd"] += ry
+            if num(r, "touchdown") == 1 and g(r, "td_team") == rt:
+                S.dst_for[(rt, wk)]["dst_ret_td"] += 1
+        if not de or not off:
             continue
+        if pt in ("pass", "run") and not num(r, "two_point_attempt"):
+            S.dst_ya[(de, wk)] += num(r, "yards_gained")
         ev = Counter()
         if num(r, "sack") == 1:
             ev["dst_sack"] += 1
         if num(r, "interception") == 1:
             ev["dst_int"] += 1
+            if num(r, "touchdown") == 1 and g(r, "td_team") == de and g(r, "passer_player_id"):
+                S.extra[(r["passer_player_id"], wk)]["pick6"] += 1
         if num(r, "fumble_lost") == 1:
             ev["dst_fr"] += 1
-        if num(r, "touchdown") == 1 and g(r, "td_team") == de:
+        if num(r, "touchdown") == 1 and g(r, "td_team") == de and not special:
             ev["dst_td"] += 1
         if num(r, "safety") == 1:
             ev["dst_safety"] += 1
+        if g(r, "field_goal_result") == "blocked" or num(r, "punt_blocked") == 1 or \
+                g(r, "extra_point_result") == "blocked":
+            ev["dst_blk"] += 1
+        if num(r, "defensive_two_point_conv") == 1 or num(r, "defensive_extra_point_conv") == 1:
+            ev["dst_xp_ret"] += 1
         if ev:
             S.dst_for[(de, wk)].update(ev)
             S.dst_against[(off, wk)].update(ev)
+        # 40+ yard offensive touchdowns (for leagues with long-TD bonuses)
+        if num(r, "touchdown") == 1 and g(r, "td_team") == off and num(r, "yards_gained") >= 40:
+            for col in ("passer_player_id", "receiver_player_id", "rusher_player_id"):
+                if g(r, col):
+                    S.extra[(r[col], wk)]["td40"] += 1
     S.dst_pa = {}
     for gm in S.schedule:
         if gm["home_score"] is None:
@@ -2243,8 +2297,12 @@ def position_projections(S, pos, week=None):
 # Kickers and team defenses (projections use each league's own K / DEF scoring)
 # ------------------------------------------------------------------------------------
 
-K_KEYS = ["fg_0_39", "fg_40_49", "fg_50p", "fg_miss", "xp", "xp_miss"]
-DST_KEYS = ["dst_sack", "dst_int", "dst_fr", "dst_td", "dst_safety"]
+K_KEYS = ["fg_0_19", "fg_20_29", "fg_30_39", "fg_40_49", "fg_50p", "fgm_0_19", "fgm_20_29", "fgm_30_39",
+          "fgm_40_49", "fgm_50p", "xp", "xp_miss"]
+DST_KEYS = ["dst_sack", "dst_int", "dst_fr", "dst_td", "dst_ret_td", "dst_safety", "dst_blk", "dst_xp_ret",
+            "dst_ret_yd"]
+YA_TIERS = [(99, "ya_0_99"), (199, "ya_100_199"), (299, "ya_200_299"), (349, "ya_300_349"), (399, "ya_350_399"),
+            (449, "ya_400_449"), (499, "ya_450_499"), (549, "ya_500_549"), (99999, "ya_550p")]
 PA_TIERS = [(0, "pa_0"), (6, "pa_1_6"), (13, "pa_7_13"), (20, "pa_14_20"), (27, "pa_21_27"), (34, "pa_28_34"),
             (999, "pa_35p")]
 
@@ -2264,8 +2322,27 @@ def pa_points(pa, sc):
     return 0.0
 
 
-def dst_points(c, pa, sc):
-    return sum(_sc(sc, k) * c.get(k, 0) for k in DST_KEYS) + (pa_points(pa, sc) if pa is not None else 0.0)
+def ya_points(ya, sc):
+    for top, key in YA_TIERS:
+        if ya <= top:
+            return _sc(sc, key)
+    return 0.0
+
+
+def dst_points(c, pa, sc, ya=None):
+    return (sum(_sc(sc, k) * c.get(k, 0) for k in DST_KEYS) + (pa_points(pa, sc) if pa is not None else 0.0)
+            + (ya_points(ya, sc) if ya is not None else 0.0))
+
+
+def _expected_tier_points(mu, sd, fn, sc, lo, hi, step):
+    tot = wsum = 0.0
+    x = lo
+    while x <= hi:
+        w = math.exp(-0.5 * ((x - mu) / sd) ** 2)
+        tot += w * fn(x, sc)
+        wsum += w
+        x += step
+    return tot / wsum if wsum else 0.0
 
 
 def _expected_pa_points(mu, sc, sd=9.5):
@@ -2275,6 +2352,13 @@ def _expected_pa_points(mu, sc, sd=9.5):
         tot += w * pa_points(x, sc)
         wsum += w
     return tot / wsum if wsum else 0.0
+
+
+def opp_of_week(S, team, week):
+    gm = team_game(S, team, week)
+    if not gm:
+        return None
+    return gm["away"] if gm["home"] == team else gm["home"]
 
 
 def kdef_actual(S, kind, ident, week):
@@ -2287,7 +2371,8 @@ def kdef_actual(S, kind, ident, week):
         return None
     if kind == "K":
         return kicker_points(S.k_games.get((ident, week), Counter()), S.scoring)
-    return dst_points(S.dst_for.get((ident, week), Counter()), S.dst_pa.get((ident, week)), S.scoring)
+    return dst_points(S.dst_for.get((ident, week), Counter()), S.dst_pa.get((ident, week)), S.scoring,
+                      S.dst_ya.get((ident, week)) if hasattr(S, "dst_ya") else None)
 
 
 def _kdef_cache(S):
@@ -2351,7 +2436,13 @@ def project_kdef(S, kind, ident, week=None):
         events = 0.5 * own + 0.5 * opp_give
         mu = imp_opp if imp_opp is not None else (mean([S.dst_pa.get((t, w)) for (t, w) in S.dst_pa if t == opp]) or 22)
         pa_pts = _expected_pa_points(mu, S.scoring)
-        proj = events + pa_pts
+        ya_pts = 0.0
+        if any(_sc(S.scoring, k) for _, k in YA_TIERS) and hasattr(S, "dst_ya"):
+            own_ya = mean([v for (t, w), v in S.dst_ya.items() if t == ident]) or 330
+            opp_off = mean([v for (t, w), v in S.dst_ya.items() if opp_of_week(S, t, w) == opp]) or 330
+            ya_pts = _expected_tier_points(0.5 * own_ya + 0.5 * opp_off, 70, ya_points, S.scoring, 0, 700, 10)
+            out["reasons"].append(("info", f"Yards-allowed scoring: {ya_pts:+.1f} expected."))
+        proj = events + pa_pts + ya_pts
         out["implied"] = imp_opp
         out["reasons"].append(("info", f"Sacks, turnovers and TDs: {events:.1f} expected (his defense {own:.1f}/game, "
                                        f"{opp} gives up {opp_give:.1f}/game)."))
@@ -2490,6 +2581,22 @@ def backtest(S, min_prior=3, horizon=3):
             out["by_pos"][label] = {k: stats(k, subset) for k in ("model", "ppg", "last3")}
             out["by_pos"][label]["n"] = len(subset)
     return out
+
+
+INJURY_CACHES = ("_base", "_posproj", "_model", "_rosr", "_gapc", "_kdef_pool")
+
+
+def with_injury_overrides(S, overrides):
+    """A view of S where the injury statuses your league platform showed at sync time (e.g. Yahoo's 'O' on game
+    day) take priority over the official report, which publishes less often. Everything else is shared."""
+    if not overrides:
+        return S
+    S2 = Season.__new__(Season)
+    S2.__dict__.update(S.__dict__)
+    S2.injuries = {**S.injuries, **overrides}
+    for k in INJURY_CACHES:
+        S2.__dict__.pop(k, None)
+    return S2
 
 
 # ------------------------------------------------------------------------------------

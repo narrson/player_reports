@@ -31,7 +31,7 @@ import player_report as pr
 st.set_page_config(page_title="Fantasy Player Reports", page_icon="🏈", layout="wide",
                    initial_sidebar_state="collapsed")
 
-REQUIRED_ENGINE = 8
+REQUIRED_ENGINE = 9
 if getattr(pr, "ENGINE_VERSION", 0) < REQUIRED_ENGINE:
     # Streamlit can keep an old copy of player_report.py loaded after an update; load the new one.
     import importlib
@@ -437,7 +437,7 @@ def styled_df(df, row_bg=None, cell=None, height=None, **kw):
 # Data (cached on the server, shared by every visit)
 # ------------------------------------------------------------------------------------
 
-DATA_VERSION = 8  # bump whenever player_report.py changes what a Season holds, so stale cached data is dropped
+DATA_VERSION = 9  # bump whenever player_report.py changes what a Season holds, so stale cached data is dropped
 
 
 def preset_scoring(fmt_name):
@@ -2759,25 +2759,56 @@ def slots_from_entries(entries):
 
 # ----- League scoring -----
 
-SCORING_FIELDS = [("pass_yd", "Passing yards (points per yard)", 0.04), ("pass_td", "Passing TD", 4.0),
-                  ("int", "Interception thrown", -1.0), ("rush_yd", "Rushing yards (per yard)", 0.1),
-                  ("rush_td", "Rushing TD", 6.0), ("rec", "Reception (PPR)", 0.5),
-                  ("te_rec", "TE premium (extra per TE catch)", 0.0), ("rec_yd", "Receiving yards (per yard)", 0.1),
-                  ("rec_td", "Receiving TD", 6.0), ("fum_lost", "Fumble lost", -2.0), ("two_pt", "2-point conversion", 2.0),
-                  ("st_td", "Return TD", 6.0)]
-K_FIELDS = [("fg_0_39", "FG made, 0-39 yds", 3.0), ("fg_40_49", "FG made, 40-49 yds", 4.0),
-            ("fg_50p", "FG made, 50+ yds", 5.0), ("fg_miss", "FG missed", 0.0), ("xp", "Extra point made", 1.0),
-            ("xp_miss", "Extra point missed", 0.0)]
+SCORING_FIELDS = [
+    ("pass_yd", "Passing yards (points per yard)", 0.04), ("pass_td", "Passing TD", 4.0),
+    ("int", "Interception thrown", -1.0), ("pick6", "Pick-six thrown (extra)", 0.0),
+    ("pass_cmp", "Completion", 0.0), ("pass_inc", "Incomplete pass", 0.0), ("pass_att", "Pass attempt", 0.0),
+    ("pass_fd", "Passing first down", 0.0),
+    ("rush_yd", "Rushing yards (per yard)", 0.1), ("rush_td", "Rushing TD", 6.0), ("rush_att", "Rush attempt", 0.0),
+    ("rush_fd", "Rushing first down", 0.0),
+    ("rec", "Reception (PPR)", 0.5), ("te_rec", "TE premium (extra per TE catch)", 0.0), ("rec_tgt", "Target", 0.0),
+    ("rec_yd", "Receiving yards (per yard)", 0.1), ("rec_td", "Receiving TD", 6.0),
+    ("rec_fd", "Receiving first down", 0.0),
+    ("two_pt", "2-point conversion", 2.0), ("fum", "Fumble (lost or not)", 0.0), ("fum_lost", "Fumble lost", -2.0),
+    ("fum_ret_td", "Offensive fumble return TD", 6.0), ("st_td", "Return TD (player)", 6.0),
+    ("ret_yd", "Return yards (player, per yard)", 0.0)]
+BONUS_FIELDS = [("bonus_pass_300", "300+ passing yards in a game", 0.0), ("bonus_pass_400", "400+ passing yards", 0.0),
+                ("bonus_rush_100", "100+ rushing yards", 0.0), ("bonus_rush_200", "200+ rushing yards", 0.0),
+                ("bonus_rec_100", "100+ receiving yards", 0.0), ("bonus_rec_200", "200+ receiving yards", 0.0),
+                ("bonus_td_40", "40+ yard TD (each, passer and scorer)", 0.0)]
+K_FIELDS = [("fg_0_19", "FG made 0-19 yds", 3.0), ("fg_20_29", "FG made 20-29 yds", 3.0),
+            ("fg_30_39", "FG made 30-39 yds", 3.0), ("fg_40_49", "FG made 40-49 yds", 4.0),
+            ("fg_50p", "FG made 50+ yds", 5.0), ("fgm_0_19", "FG missed 0-19 yds", 0.0),
+            ("fgm_20_29", "FG missed 20-29 yds", 0.0), ("fgm_30_39", "FG missed 30-39 yds", 0.0),
+            ("fgm_40_49", "FG missed 40-49 yds", 0.0), ("fgm_50p", "FG missed 50+ yds", 0.0),
+            ("xp", "Extra point made", 1.0), ("xp_miss", "Extra point missed", 0.0)]
 DST_FIELDS = [("dst_sack", "Sack", 1.0), ("dst_int", "Interception", 2.0), ("dst_fr", "Fumble recovery", 2.0),
-              ("dst_td", "Defensive / return TD", 6.0), ("dst_safety", "Safety", 2.0),
+              ("dst_td", "Defensive TD", 6.0), ("dst_ret_td", "Kickoff / punt return TD", 6.0),
+              ("dst_safety", "Safety", 2.0), ("dst_blk", "Blocked kick", 2.0),
+              ("dst_xp_ret", "Extra point / 2-pt returned", 2.0), ("dst_ret_yd", "Return yards (per yard)", 0.0),
               ("pa_0", "0 points allowed", 10.0), ("pa_1_6", "1-6 points allowed", 7.0),
               ("pa_7_13", "7-13 points allowed", 4.0), ("pa_14_20", "14-20 points allowed", 1.0),
               ("pa_21_27", "21-27 points allowed", 0.0), ("pa_28_34", "28-34 points allowed", -1.0),
-              ("pa_35p", "35+ points allowed", -4.0)]
-ALL_SCORING_FIELDS = SCORING_FIELDS + K_FIELDS + DST_FIELDS
+              ("pa_35p", "35+ points allowed", -4.0),
+              ("ya_0_99", "0-99 yards allowed", 0.0), ("ya_100_199", "100-199 yards allowed", 0.0),
+              ("ya_200_299", "200-299 yards allowed", 0.0), ("ya_300_349", "300-349 yards allowed", 0.0),
+              ("ya_350_399", "350-399 yards allowed", 0.0), ("ya_400_449", "400-449 yards allowed", 0.0),
+              ("ya_450_499", "450-499 yards allowed", 0.0), ("ya_500_549", "500-549 yards allowed", 0.0),
+              ("ya_550p", "550+ yards allowed", 0.0)]
+ALL_SCORING_FIELDS = SCORING_FIELDS + BONUS_FIELDS + K_FIELDS + DST_FIELDS
+SECTION_FIELDS = {"offense": [f[0] for f in SCORING_FIELDS + BONUS_FIELDS], "kicker": [f[0] for f in K_FIELDS],
+                  "defense": [f[0] for f in DST_FIELDS]}
 
 
 def clean_scoring(sc):
+    sc = dict(sc or {})
+    # older saves used combined kicker buckets
+    if "fg_0_39" in sc:
+        for k in ("fg_0_19", "fg_20_29", "fg_30_39"):
+            sc.setdefault(k, sc["fg_0_39"])
+    if "fg_miss" in sc:
+        for k in ("fgm_0_19", "fgm_20_29", "fgm_30_39", "fgm_40_49", "fgm_50p"):
+            sc.setdefault(k, sc["fg_miss"])
     out = {}
     for k, _, d in ALL_SCORING_FIELDS:
         try:
@@ -2813,99 +2844,226 @@ def sleeper_scoring(ss):
             if ss.get(k) is not None:
                 return float(ss[k])
         return d
-    return clean_scoring({"pass_yd": v("pass_yd", d=0.04), "pass_td": v("pass_td", d=4), "int": v("pass_int", d=-1),
-                          "rush_yd": v("rush_yd", d=0.1), "rush_td": v("rush_td", d=6), "rec": v("rec", d=0),
-                          "te_rec": v("bonus_rec_te", d=0), "rec_yd": v("rec_yd", d=0.1), "rec_td": v("rec_td", d=6),
-                          "fum_lost": v("fum_lost", d=-2), "two_pt": v("rec_2pt", "rush_2pt", "pass_2pt", d=2),
-                          "st_td": v("st_td", "kr_td", "pr_td", d=6),
-                          "fg_0_39": v("fgm_30_39", "fgm_20_29", "fgm_0_19", "fgm", d=3), "fg_40_49": v("fgm_40_49", d=4),
-                          "fg_50p": v("fgm_50p", "fgm_50_59", d=5), "fg_miss": v("fgmiss", "fgmiss_30_39", d=0),
-                          "xp": v("xpm", d=1), "xp_miss": v("xpmiss", d=0),
-                          "dst_sack": v("sack", d=1), "dst_int": v("int", d=2), "dst_fr": v("fum_rec", d=2),
-                          "dst_td": v("def_td", "def_st_td", d=6), "dst_safety": v("safe", d=2),
-                          "pa_0": v("pts_allow_0", d=10), "pa_1_6": v("pts_allow_1_6", d=7),
-                          "pa_7_13": v("pts_allow_7_13", d=4), "pa_14_20": v("pts_allow_14_20", d=1),
-                          "pa_21_27": v("pts_allow_21_27", d=0), "pa_28_34": v("pts_allow_28_34", d=-1),
-                          "pa_35p": v("pts_allow_35p", d=-4)})
+    return clean_scoring({
+        "pass_yd": v("pass_yd", d=0.04), "pass_td": v("pass_td", d=4), "int": v("pass_int", d=-1),
+        "pick6": v("pass_int_td", d=0), "pass_cmp": v("pass_cmp", d=0), "pass_inc": v("pass_inc", d=0),
+        "pass_att": v("pass_att", d=0), "pass_fd": v("pass_fd", d=0),
+        "rush_yd": v("rush_yd", d=0.1), "rush_td": v("rush_td", d=6), "rush_att": v("rush_att", d=0),
+        "rush_fd": v("rush_fd", d=0), "rec": v("rec", d=0), "te_rec": v("bonus_rec_te", d=0),
+        "rec_tgt": v("rec_tgt", d=0), "rec_yd": v("rec_yd", d=0.1), "rec_td": v("rec_td", d=6),
+        "rec_fd": v("rec_fd", d=0), "two_pt": v("rec_2pt", "rush_2pt", "pass_2pt", d=2), "fum": v("fum", d=0),
+        "fum_lost": v("fum_lost", d=-2), "fum_ret_td": v("fum_rec_td", d=6), "st_td": v("st_td", "kr_td", "pr_td", d=6),
+        "ret_yd": v("kr_yd", "pr_yd", d=0),
+        "bonus_pass_300": v("bonus_pass_yd_300", d=0), "bonus_pass_400": v("bonus_pass_yd_400", d=0),
+        "bonus_rush_100": v("bonus_rush_yd_100", d=0), "bonus_rush_200": v("bonus_rush_yd_200", d=0),
+        "bonus_rec_100": v("bonus_rec_yd_100", d=0), "bonus_rec_200": v("bonus_rec_yd_200", d=0),
+        "bonus_td_40": v("rec_td_40p", "rush_td_40p", "pass_td_40p", d=0),
+        "fg_0_19": v("fgm_0_19", "fgm", d=3), "fg_20_29": v("fgm_20_29", "fgm", d=3), "fg_30_39": v("fgm_30_39", "fgm", d=3),
+        "fg_40_49": v("fgm_40_49", "fgm", d=4), "fg_50p": v("fgm_50p", "fgm_50_59", d=5),
+        "fgm_0_19": v("fgmiss_0_19", "fgmiss", d=0), "fgm_20_29": v("fgmiss_20_29", "fgmiss", d=0),
+        "fgm_30_39": v("fgmiss_30_39", "fgmiss", d=0), "fgm_40_49": v("fgmiss_40_49", "fgmiss", d=0),
+        "fgm_50p": v("fgmiss_50p", "fgmiss", d=0), "xp": v("xpm", d=1), "xp_miss": v("xpmiss", d=0),
+        "dst_sack": v("sack", d=1), "dst_int": v("int", d=2), "dst_fr": v("fum_rec", d=2), "dst_td": v("def_td", d=6),
+        "dst_ret_td": v("def_st_td", "st_td", d=6), "dst_safety": v("safe", d=2), "dst_blk": v("blk_kick", d=2),
+        "dst_xp_ret": v("def_2pt", d=2), "dst_ret_yd": v("def_kr_yd", "def_pr_yd", d=0),
+        "pa_0": v("pts_allow_0", d=10), "pa_1_6": v("pts_allow_1_6", d=7), "pa_7_13": v("pts_allow_7_13", d=4),
+        "pa_14_20": v("pts_allow_14_20", d=1), "pa_21_27": v("pts_allow_21_27", d=0),
+        "pa_28_34": v("pts_allow_28_34", d=-1), "pa_35p": v("pts_allow_35p", d=-4),
+        "ya_0_99": v("yds_allow_0_100", d=0), "ya_100_199": v("yds_allow_100_199", d=0),
+        "ya_200_299": v("yds_allow_200_299", d=0), "ya_300_349": v("yds_allow_300_349", d=0),
+        "ya_350_399": v("yds_allow_350_399", d=0), "ya_400_449": v("yds_allow_400_449", d=0),
+        "ya_450_499": v("yds_allow_450_499", d=0), "ya_500_549": v("yds_allow_500_549", d=0),
+        "ya_550p": v("yds_allow_550p", d=0)})
 
 
-ESPN_STATS = {3: "pass_yd", 4: "pass_td", 20: "int", 24: "rush_yd", 25: "rush_td", 53: "rec", 42: "rec_yd",
-              43: "rec_td", 72: "fum_lost", 44: "two_pt", 101: "st_td", 102: "st_td",
-              80: "fg_0_39", 77: "fg_40_49", 74: "fg_50p", 85: "fg_miss", 86: "xp", 88: "xp_miss",
-              99: "dst_sack", 95: "dst_int", 96: "dst_fr", 94: "dst_td", 98: "dst_safety",
+ESPN_STATS = {0: "pass_att", 1: "pass_cmp", 2: "pass_inc", 3: "pass_yd", 4: "pass_td", 20: "int", 23: "rush_att",
+              24: "rush_yd", 25: "rush_td", 53: "rec", 58: "rec_tgt", 42: "rec_yd", 43: "rec_td", 68: "fum",
+              72: "fum_lost", 19: "two_pt", 26: "two_pt", 44: "two_pt", 101: "st_td", 102: "st_td",
+              74: "fg_50p", 77: "fg_40_49", 76: "fgm_50p", 79: "fgm_40_49", 86: "xp", 88: "xp_miss",
+              99: "dst_sack", 95: "dst_int", 96: "dst_fr", 94: "dst_td", 98: "dst_safety", 97: "dst_blk",
               89: "pa_0", 90: "pa_1_6", 91: "pa_7_13", 92: "pa_14_20", 124: "pa_21_27", 125: "pa_28_34", 126: "pa_35p"}
 
 
 def espn_scoring(items):
     sc = {k: d for k, _, d in ALL_SCORING_FIELDS}
-    sc.update(rec=0, pass_td=4, int=-2)  # ESPN defaults when a category is absent
+    sc.update(rec=0, pass_td=4, int=-2)
+    for k in ("ya_0_99", "ya_100_199", "ya_200_299", "ya_300_349", "ya_350_399", "ya_400_449", "ya_450_499",
+              "ya_500_549", "ya_550p"):
+        sc[k] = 0
     for it in items or []:
-        key = ESPN_STATS.get(it.get("statId"))
+        sid, pts = it.get("statId"), float(it.get("points") or 0)
+        key = ESPN_STATS.get(sid)
         if key:
-            sc[key] = float(it.get("points") or 0)
-        if it.get("statId") == 53:
-            ov = (it.get("pointsOverrides") or {}).get("6")  # TE slot override = TE premium
+            sc[key] = pts
+        if sid == 80:  # ESPN groups FGs under 40 yards
+            sc["fg_0_19"] = sc["fg_20_29"] = sc["fg_30_39"] = pts
+        if sid == 82:
+            sc["fgm_0_19"] = sc["fgm_20_29"] = sc["fgm_30_39"] = pts
+        if sid == 85:  # total missed FGs
+            for k in ("fgm_0_19", "fgm_20_29", "fgm_30_39", "fgm_40_49", "fgm_50p"):
+                sc[k] = sc.get(k, 0) + pts
+        if sid == 53:
+            ov = (it.get("pointsOverrides") or {}).get("6")
             if ov is not None:
-                sc["te_rec"] = float(ov) - sc["rec"]
+                sc["te_rec"] = float(ov) - pts
     return clean_scoring(sc)
 
 
-YAHOO_SCORE_LABELS = [("passing yards", "pass_yd"), ("passing touchdowns", "pass_td"),
-                      ("rushing yards", "rush_yd"), ("rushing touchdowns", "rush_td"), ("receptions", "rec"),
-                      ("receiving yards", "rec_yd"), ("receiving touchdowns", "rec_td"), ("fumbles lost", "fum_lost"),
-                      ("2-point conversions", "two_pt"), ("return touchdowns", "st_td"),
-                      ("point after attempt made", "xp"), ("point after attempt missed", "xp_miss"),
-                      ("field goals missed", "fg_miss"), ("sack", "dst_sack"), ("fumble recovery", "dst_fr"),
-                      ("safety", "dst_safety"), ("touchdown", "dst_td")]
-
-
-def _yahoo_num(val):
-    m = re.search(r"(-?\d+(?:\.\d+)?)\s*yards?\s*per\s*point", val)
+def _score_value(val):
+    """'20 yards per point' -> 0.05, '1 point per 25 yards' -> 0.04, '-1' -> -1."""
+    v = str(val).strip().lower()
+    m = re.search(r"(-?\d+(?:\.\d+)?)\s*yards?\s*per\s*point", v)
     if m and float(m.group(1)):
         return 1 / float(m.group(1))
-    m = re.search(r"-?\d+(?:\.\d+)?", val)
+    m = re.search(r"(-?\d+(?:\.\d+)?)\s*points?\s*per\s*(\d+(?:\.\d+)?)\s*yards?", v)
+    if m and float(m.group(2)):
+        return float(m.group(1)) / float(m.group(2))
+    m = re.search(r"-?\d+(?:\.\d+)?", v)
     return float(m.group(0)) if m else None
 
 
-def yahoo_scoring(rows):
-    """rows: [label, value] pairs read from the Yahoo league settings page (offense, then K, then DEF)."""
-    found, int_seen = {}, 0
+def _range_key(prefix, lo, hi, tiers):
+    for top, key in tiers:
+        if lo <= top:
+            return key
+    return None
+
+
+PA_KEYS = [(0, "pa_0"), (6, "pa_1_6"), (13, "pa_7_13"), (20, "pa_14_20"), (27, "pa_21_27"), (34, "pa_28_34"),
+           (999, "pa_35p")]
+YA_KEYS = [(99, "ya_0_99"), (199, "ya_100_199"), (299, "ya_200_299"), (349, "ya_300_349"), (399, "ya_350_399"),
+           (449, "ya_400_449"), (499, "ya_450_499"), (549, "ya_500_549"), (99999, "ya_550p")]
+
+
+def _label_key(label, section):
+    l = re.sub(r"\s+", " ", label.lower()).strip()
+    nums = [int(x) for x in re.findall(r"\d+", l)]
+    lo = nums[0] if nums else 0
+    if section == "kicker" or l.startswith(("field goal", "point after", "pat")):
+        if l.startswith("point after") or l.startswith("pat"):
+            return "xp_miss" if "miss" in l else "xp"
+        if l.startswith("field goal"):
+            miss = "miss" in l
+            if not nums:
+                return "fgm_30_39" if miss else None
+            band = "0_19" if lo < 20 else "20_29" if lo < 30 else "30_39" if lo < 40 else "40_49" if lo < 50 else "50p"
+            return ("fgm_" if miss else "fg_") + band
+    if l.startswith("points allowed"):
+        return _range_key("pa", lo, None, PA_KEYS)
+    if l.startswith("yards allowed"):
+        return _range_key("ya", lo, None, YA_KEYS)
+    if section == "defense":
+        for pat, key in [("kickoff and punt return touchdown", "dst_ret_td"), ("return touchdown", "dst_ret_td"),
+                         ("extra point returned", "dst_xp_ret"), ("2-point return", "dst_xp_ret"),
+                         ("block", "dst_blk"), ("fumble recovery", "dst_fr"), ("sack", "dst_sack"),
+                         ("interception", "dst_int"), ("safety", "dst_safety"), ("return yards", "dst_ret_yd"),
+                         ("touchdown", "dst_td"), ("defensive touchdown", "dst_td")]:
+            if l.startswith(pat):
+                return key
+        return None
+    for pat, key in [("passing yards", "pass_yd"), ("passing touchdown", "pass_td"), ("pick six", "pick6"),
+                     ("pick-six", "pick6"), ("interception", "int"), ("completions", "pass_cmp"),
+                     ("incomplete pass", "pass_inc"), ("passing attempt", "pass_att"), ("pass attempt", "pass_att"),
+                     ("passing 1st down", "pass_fd"), ("passing first down", "pass_fd"),
+                     ("rushing yards", "rush_yd"), ("rushing touchdown", "rush_td"), ("rushing attempt", "rush_att"),
+                     ("rush attempt", "rush_att"), ("rushing 1st down", "rush_fd"), ("rushing first down", "rush_fd"),
+                     ("receptions", "rec"), ("targets", "rec_tgt"), ("receiving yards", "rec_yd"),
+                     ("receiving touchdown", "rec_td"), ("receiving 1st down", "rec_fd"),
+                     ("receiving first down", "rec_fd"), ("return touchdown", "st_td"), ("return yards", "ret_yd"),
+                     ("2-point conversion", "two_pt"), ("two-point conversion", "two_pt"),
+                     ("fumbles lost", "fum_lost"), ("offensive fumble return", "fum_ret_td"), ("fumble return td", "fum_ret_td"),
+                     ("fumbles", "fum")]:
+        if l.startswith(pat):
+            return key
+    if "40+" in l and "touchdown" in l:
+        return "bonus_td_40"
+    if ("pass" in l and "300" in l) or ("pass" in l and "400" in l):
+        return "bonus_pass_400" if "400" in l else "bonus_pass_300"
+    if "rush" in l and ("100" in l or "200" in l):
+        return "bonus_rush_200" if "200" in l else "bonus_rush_100"
+    if ("rec" in l) and ("100" in l or "200" in l):
+        return "bonus_rec_200" if "200" in l else "bonus_rec_100"
+    return None
+
+
+DEFENSE_ONLY = {"dst_sack", "dst_fr", "dst_safety", "dst_blk", "dst_ret_td", "dst_xp_ret"}
+
+
+def parse_scoring_rows(rows):
+    """Read a league scoring table (rows of [label, value, ...]) the way Yahoo shows it: sections for offense,
+    kickers and defense, listing only the categories the league uses. Categories missing from a section that was
+    read are worth 0 in that league, which is what makes the transfer exact."""
+    found, seen_sections, section, int_seen = {}, Counter(), "offense", 0
     for row in rows or []:
-        if not isinstance(row, (list, tuple)) or len(row) < 2:
+        if not isinstance(row, (list, tuple)) or not row:
             continue
-        label, val = str(row[0]).strip().lower(), str(row[1]).strip().lower()
-        n = _yahoo_num(val)
+        label = str(row[0]).strip()
+        val = str(row[1]).strip() if len(row) > 1 else ""
+        low = label.lower()
+        if low in ("offense", "offensive players") or low.startswith("offense"):
+            section = "offense"
+            continue
+        if low.startswith("kicker"):
+            section = "kicker"
+            continue
+        if low.startswith("defense") or low.startswith("special teams") or low.startswith("team defense"):
+            section = "defense"
+            continue
+        if val.lower() in ("league value", "value", "points"):
+            continue
+        n = _score_value(val)
         if n is None:
             continue
-        if label.startswith("interception"):
-            found.setdefault("int" if int_seen == 0 else "dst_int", n)
+        key = _label_key(label, section)
+        if section != "defense" and key is None:
+            k2 = _label_key(label, "defense")
+            if k2 in DEFENSE_ONLY or (k2 and k2.startswith(("pa_", "ya_"))):
+                section, key = "defense", k2          # tables without headers: defense rows start here
+        if key and key in SECTION_FIELDS["kicker"]:
+            section = "kicker" if section == "offense" else section
+        if key == "int" and section != "defense":
             int_seen += 1
+            if int_seen > 1:
+                key = "dst_int"
+        if not key or key in found:
             continue
-        m = re.match(r"field goals? (\d+)\s*[-–]\s*(\d+)", label)
+        found[key] = n
+        sec_of = next((s_ for s_, ks in SECTION_FIELDS.items() if key in ks), section)
+        seen_sections[sec_of] += 1
+    offense_found = sum(1 for k in found if k in SECTION_FIELDS["offense"])
+    if offense_found < 4:
+        return None, {}
+    sc = {k: d for k, _, d in ALL_SCORING_FIELDS}
+    for sec_name, keys in SECTION_FIELDS.items():
+        if seen_sections[sec_name] >= 3:
+            for k in keys:
+                sc[k] = 0.0  # not listed in the league's table = not scored
+    sc.update(found)
+    return clean_scoring(sc), {"found": len(found), "sections": dict(seen_sections)}
+
+
+def yahoo_scoring(rows):
+    return parse_scoring_rows(rows)[0]
+
+
+def parse_scoring_text(text):
+    """Scoring settings copied from a league settings page and pasted (tabs or spaces between columns)."""
+    rows = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = [p.strip() for p in re.split(r"\t+|\s{2,}", line) if p.strip()]
+        if len(parts) >= 2:
+            rows.append(parts)
+            continue
+        m = re.match(r"^(.*?\D)\s+(-?\d+(?:\.\d+)?(?:\s+yards?\s+per\s+point|\s+points?\s+per\s+\d+\s+yards?)?)"
+                     r"(?:\s+-?\d+(?:\.\d+)?(?:\s+yards?\s+per\s+point)?)?$", line, re.I)
         if m:
-            lo = int(m.group(1))
-            key = "fg_0_39" if lo < 40 else "fg_40_49" if lo < 50 else "fg_50p"
-            if key == "fg_0_39":
-                found["fg_0_39"] = n  # the 30-39 row (listed last of the short ones) wins
-            else:
-                found.setdefault(key, n)
-            continue
-        if re.match(r"field goals? (50|50\+)", label):
-            found.setdefault("fg_50p", n)
-            continue
-        m = re.match(r"points allowed (\d+)(?:\s*[-–]\s*(\d+))?", label)
-        if m:
-            lo = int(m.group(1))
-            key = "pa_0" if lo == 0 and not m.group(2) else "pa_1_6" if lo <= 6 else "pa_7_13" if lo <= 13 else \
-                "pa_14_20" if lo <= 20 else "pa_21_27" if lo <= 27 else "pa_28_34" if lo <= 34 else "pa_35p"
-            found.setdefault(key, n)
-            continue
-        key = next((k for lab, k in YAHOO_SCORE_LABELS if label == lab or label.startswith(lab)), None)
-        if key:
-            found.setdefault(key, n)
-    if len([k for k in found if k in dict((f[0], 1) for f in SCORING_FIELDS)]) < 4:
-        return None
-    return clean_scoring({**{k: d for k, _, d in ALL_SCORING_FIELDS}, "int": -1, "rec": 0.5, **found})
+            rows.append([m.group(1).strip(), m.group(2).strip()])
+        else:
+            rows.append([line, ""])
+    return parse_scoring_rows(rows)
 
 
 # ----- Sleeper -----
@@ -3099,12 +3257,12 @@ def league_from_sync(S, payload):
     raise ValueError("Unknown sync source.")
 
 
-BOOKMARK_VERSION = 5
+BOOKMARK_VERSION = 6
 LINEUP_BOOKMARK_VERSION = 3  # older bookmarks didn't send lineup slots / K / DEF / IR
 BOOKMARKLET_JS = r"""(async()=>{const SITE='__SITE__';
 const b64=u=>{let s='';for(let i=0;i<u.length;i+=8192)s+=String.fromCharCode.apply(null,u.subarray(i,i+8192));return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')};
 const enc=async o=>{const raw=new TextEncoder().encode(JSON.stringify(o));try{const st=new Blob([raw]).stream().pipeThrough(new CompressionStream('deflate-raw'));return 'z'+b64(new Uint8Array(await new Response(st).arrayBuffer()))}catch(e){return b64(raw)}};
-const go=async o=>{o.v=5;const b=await enc(o);const u=SITE+'/?sync='+b;if(u.length<=7000){location.href=u;return}
+const go=async o=>{o.v=6;const b=await enc(o);const u=SITE+'/?sync='+b;if(u.length<=7000){location.href=u;return}
 const d=document.createElement('div');d.style.cssText='position:fixed;z-index:2147483647;top:20px;right:20px;width:380px;background:#121a2b;color:#e6edf3;border:2px solid #f5b301;border-radius:14px;padding:18px;font:14px sans-serif;box-shadow:0 10px 40px rgba(0,0,0,.5)';
 d.innerHTML='<b style="font-size:16px">Your league is ready</b><p style="color:#8b98ad;margin:8px 0 12px">It is too big to send in a link, so it goes through your clipboard.</p>';
 const bt=document.createElement('button');bt.textContent='Copy & open Fantasy Reports';bt.style.cssText='width:100%;padding:12px;border:0;border-radius:10px;background:#f5b301;color:#111;font-weight:800;font-size:15px;cursor:pointer';
@@ -3120,7 +3278,7 @@ const yr=q.get('seasonId')||new Date().getFullYear();
 const r=await fetch('https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/'+yr+'/segments/0/leagues/'+lid+'?view=mTeam&view=mRoster&view=mSettings&view=mMatchup',{credentials:'include'});
 if(!r.ok)return alert('ESPN returned '+r.status+'. Make sure you are logged in to ESPN.');
 const d=await r.json();const per=(d.status||{}).currentMatchupPeriod;const ss=d.settings||{};
-return go({src:'espn',league:lid,season:+yr,my:q.get('teamId'),data:{settings:{name:ss.name,rosterSettings:{lineupSlotCounts:(ss.rosterSettings||{}).lineupSlotCounts},scoringSettings:{scoringItems:((ss.scoringSettings||{}).scoringItems||[]).filter(i=>[3,4,19,20,24,25,26,42,43,44,53,72,101,102,74,77,80,85,86,88,89,90,91,92,94,95,96,98,99,123,124,125,126,127].includes(i.statId)).map(i=>({statId:i.statId,points:i.points,pointsOverrides:i.pointsOverrides}))}},
+return go({src:'espn',league:lid,season:+yr,my:q.get('teamId'),data:{settings:{name:ss.name,rosterSettings:{lineupSlotCounts:(ss.rosterSettings||{}).lineupSlotCounts},scoringSettings:{scoringItems:((ss.scoringSettings||{}).scoringItems||[]).filter(i=>i.statId<200).map(i=>({statId:i.statId,points:i.points,pointsOverrides:i.pointsOverrides}))}},
 members:(d.members||[]).map(m=>({id:m.id,displayName:m.displayName})),status:{currentMatchupPeriod:per},
 schedule:(d.schedule||[]).filter(s=>s.matchupPeriodId==per).map(s=>({matchupPeriodId:s.matchupPeriodId,home:{teamId:(s.home||{}).teamId},away:{teamId:(s.away||{}).teamId}})),
 teams:(d.teams||[]).map(t=>({id:t.id,name:t.name||((t.location||'')+' '+(t.nickname||'')).trim(),owners:t.owners,record:{overall:((t.record||{}).overall)||{}},roster:{entries:((t.roster||{}).entries||[]).map(e=>{const pl=((e.playerPoolEntry||{}).player)||{};return {playerId:e.playerId,lineupSlotId:e.lineupSlotId,playerPoolEntry:{player:{fullName:pl.fullName,defaultPositionId:pl.defaultPositionId,proTeamId:pl.proTeamId,injuryStatus:pl.injuryStatus}}}})}}))}})}
@@ -3136,12 +3294,15 @@ doc.querySelectorAll('tr').forEach(tr=>{const a=tr.querySelector('a[href*="/nfl/
 const href=a.getAttribute('href')||'',nm=a.textContent.trim();if(nm.length<2)return;
 const pm=href.match(/players\/(\d+)/),tm=href.match(/teams\/([a-z]+)/);const key=pm?pm[1]:'t'+(tm?tm[1]:nm);if(seen.has(key))return;seen.add(key);
 const pe=tr.querySelector('[data-pos]');let slot=pe?pe.getAttribute('data-pos'):'';if(!slot){const c=tr.querySelector('td');slot=c?c.textContent.trim():''}
-const inj=tr.querySelector('.F-injury');pl.push(trim([pm?pm[1]:'',nm,(slot||'').slice(0,8),pm?'':(tm?tm[1]:''),inj?inj.textContent.trim().slice(0,4):'']))});
+const ie=tr.querySelector('.F-injury,[class*="injury"],[class*="Injury"]');let injt=ie?ie.textContent.trim():'';
+if(!injt){const sm=tr.querySelectorAll('span,abbr,em,strong');for(let k=0;k<sm.length;k++){const tx=(sm[k].textContent||'').trim();if(/^(Q|D|O|IR|IR-R|IR-N|PUP|PUP-R|PUP-P|SUSP|NA|COV|NFI-R)$/.test(tx)){injt=tx;break}}}
+const inj={textContent:injt};pl.push(trim([pm?pm[1]:'',nm,(slot||'').slice(0,8),pm?'':(tm?tm[1]:''),inj.textContent.slice(0,6)]))});
 if(!pl.length){doc.querySelectorAll('a[href*="/nfl/players/"]').forEach(a=>{const mm=(a.getAttribute('href')||'').match(/players\/(\d+)/);const t=a.textContent.trim();
 if(mm&&t.length>3&&!seen.has(mm[1])){seen.add(mm[1]);pl.push([mm[1],t])}})}
 if(pl.length)teams.push({id:id,name:names[id]||('Team '+id),players:pl})}
 if(!teams.length)return alert('Could not read the rosters. Make sure you are logged in to Yahoo.');
-let sc=[];try{const sd=await get('/f1/'+lid+'/settings');sd.querySelectorAll('tr').forEach(tr=>{const c=tr.querySelectorAll('td,th');if(c.length>=2){const a=c[0].textContent.trim(),b=c[1].textContent.trim();if(a&&b&&a.length<50&&b.length<60&&/passing|rushing|receiving|reception|interception|fumble|2-point|touchdown|field goal|point after|sack|safety|points allowed/i.test(a))sc.push([a,b])}});sc=sc.slice(0,70)}catch(e){}
+let sc=[];try{const sd=await get('/f1/'+lid+'/settings');let on=false;sd.querySelectorAll('tr').forEach(tr=>{const c=tr.querySelectorAll('td,th');if(c.length<2)return;const a=c[0].textContent.trim(),b=c[1].textContent.trim();
+if(/^(offense|kickers|defense)/i.test(a)&&/value/i.test(b))on=true;if(on&&a&&a.length<60&&b.length<40)sc.push([a,b])});sc=sc.slice(0,120)}catch(e){}
 return go({src:'yahoo',league:lid,name:((home.querySelector('title')||{}).textContent||'').split('|')[0].trim(),my:my,teams:teams,sc:sc})}
 alert('Open your league on Yahoo, ESPN or Sleeper first, then tap this bookmark.')
 }catch(e){alert('Sync failed: '+e.message)}})();"""
@@ -3547,29 +3708,53 @@ def effective_scoring(league):
 def league_settings_editor(store, owner, row, lg):
     rid = row["id"]
     cur = effective_scoring(lg) or clean_scoring(preset_scoring(lg.get("scoring", "half")))
-    st.markdown("**Scoring**")
     src = "You edited this." if lg.get("scoring_manual") else \
-        (f"Synced from {lg['scoring_source']}." if lg.get("scoring_source") else "Not synced; please check it.")
-    st.caption(src + " Bonuses (100-yard games, long TDs) and yards-allowed defense scoring aren't modeled.")
+        (f"Synced from {lg['scoring_source']}." if lg.get("scoring_source") else "Not synced yet; please check it.")
+    st.markdown(f"**Scoring** · <span style='color:{MUTED};font-size:.85rem'>{esc(src)}</span>", unsafe_allow_html=True)
+    if lg.get("platform") == "yahoo" and lg.get("bookmark_version", 1) < BOOKMARK_VERSION:
+        st.info("Your newest bookmark reads your full Yahoo scoring table (every kicker, defense and bonus "
+                "category). Add it from Update from Yahoo, then click it on Yahoo, or paste the table below.")
+    with st.expander("📋 Paste your league's scoring table (exact copy)", expanded=not lg.get("scoring_source")):
+        st.caption("On your league site, open the scoring settings (Yahoo: League → Settings), select the whole "
+                   "scoring table from 'Offense' down to the last defense row, copy, and paste it here. Every "
+                   "category is read, and anything your league doesn't list counts as 0.")
+        txt = st.text_area("Scoring table", height=140, key=f"scpaste_{rid}", label_visibility="collapsed",
+                           placeholder="Offense   League Value\nPassing Yards   20 yards per point\n...")
+        if st.button("Read it", key=f"scread_{rid}"):
+            sc, info = parse_scoring_text(txt)
+            if not sc:
+                st.error("Couldn't read that. Make sure the copy includes the Offense rows (Passing Yards, "
+                         "Rushing Yards and so on) and their values.")
+            else:
+                lg["scoring_manual"] = sc
+                store.save(owner, rid, lg)
+                list_teams.clear()
+                st.session_state._flash = (f"Read {info['found']} scoring categories from your table and saved them "
+                                           f"for this league.")
+                st.rerun()
     presets = {"Current": cur, "Standard": clean_scoring(preset_scoring("standard")),
                "Half-PPR": clean_scoring(preset_scoring("half")), "PPR": clean_scoring(preset_scoring("ppr")),
                "Half-PPR, 6-pt pass TD": clean_scoring({**preset_scoring("half"), "pass_td": 6})}
-    pick = st.selectbox("Start from", list(presets), key=f"scp_{rid}")
+    pick = st.selectbox("Or edit by hand, starting from", list(presets), key=f"scp_{rid}")
     base = presets[pick]
     vals = {}
-    for tab, fields in zip(st.tabs(["Offense", "Kicker", "Defense"]), [SCORING_FIELDS, K_FIELDS, DST_FIELDS]):
+    for tab, fields in zip(st.tabs(["Offense", "Bonuses", "Kicker", "Defense"]),
+                           [SCORING_FIELDS, BONUS_FIELDS, K_FIELDS, DST_FIELDS]):
         with tab:
             cols = st.columns(2)
             for i, (k, lab, _) in enumerate(fields):
                 step = 0.01 if k.endswith("_yd") else 0.5
-                vals[k] = cols[i % 2].number_input(lab, value=float(base[k]), step=step,
+                vals[k] = cols[i % 2].number_input(lab, value=float(base.get(k, 0.0)), step=step,
                                                    format="%.2f" if step < 0.5 else "%.1f", key=f"sc_{k}_{rid}_{pick}")
+            if fields is SCORING_FIELDS:
+                st.caption("Yardage values are points per yard: 25 yards per point = 0.04, 20 = 0.05, 10 = 0.1.")
+    st.caption("Not modeled: individual defensive players (IDP).")
     st.markdown("**Starting lineup**")
     sl = {**DEFAULT_SLOTS, **(lg.get("slots") or {})}
     new_slots = dict(sl)
-    cols = st.columns(3)
-    for i, key in enumerate(["QB", "RB", "WR", "TE", "FLEX", "SUPERFLEX"]):
-        new_slots[key] = cols[i % 3].number_input(SLOT_LABEL.get(key, key), 0, 4, int(sl.get(key, 0)),
+    cols = st.columns(4)
+    for i, key in enumerate(["QB", "RB", "WR", "TE", "FLEX", "SUPERFLEX", "K", "DEF"]):
+        new_slots[key] = cols[i % 4].number_input(SLOT_LABEL.get(key, key), 0, 4, int(sl.get(key, 0)),
                                                   key=f"sl_{key}_{rid}")
     b1, b2 = st.columns(2)
     if b1.button("Save settings", type="primary", key=f"scsave_{rid}", use_container_width=True):
@@ -3589,7 +3774,47 @@ def league_settings_editor(store, owner, row, lg):
             st.rerun()
 
 
+PLATFORM_STATUS = {"O": "Out", "OUT": "Out", "NA": "Out", "COV": "Out", "SUSP": "Suspended", "SUSPENSION": "Suspended",
+                   "D": "Doubtful", "DOUBTFUL": "Doubtful", "Q": "Questionable", "QUESTIONABLE": "Questionable",
+                   "IR": "Injured Reserve", "IR-R": "Injured Reserve", "IR-N": "Injured Reserve",
+                   "INJURY_RESERVE": "Injured Reserve", "PUP": "Injured Reserve", "PUP-R": "Injured Reserve",
+                   "PUP-P": "Injured Reserve", "NFI-R": "Injured Reserve"}
+
+
+def league_injury_overrides(S, league):
+    """Injury statuses the league platform showed at sync time (e.g. Yahoo's game-day 'O'), which beat the
+    official report when they're newer."""
+    out = {}
+    for t in league.get("teams", []):
+        for e in t.get("entries") or []:
+            gid = e.get("gid")
+            if not gid or e.get("pos") not in pr.FANTASY_POS:
+                continue
+            raw = str(e.get("status") or "").upper().replace(" ", "_")
+            st_ = PLATFORM_STATUS.get(raw) or ("Injured Reserve" if e.get("slot") == "IR" and not raw else None)
+            if not st_:
+                continue
+            base = S.injuries.get(gid) or {}
+            out[gid] = {"week": 999, "status": st_, "injury": base.get("injury"),
+                        "practice": base.get("practice") if st_ == "Questionable" else None,
+                        "updated": "from your league"}
+    return out
+
+
+@st.cache_resource(ttl=pr.CACHE_HOURS * 3600, max_entries=24, show_spinner=False)
+def _with_overrides(_S, key, _ov):
+    return pr.with_injury_overrides(_S, _ov)
+
+
 def league_season(S, league, season):
+    LS = _league_season_base(S, league, season)
+    ov = league_injury_overrides(LS, league)
+    if not ov:
+        return LS
+    return _with_overrides(LS, skey(LS, tuple(sorted((k, v["status"]) for k, v in ov.items()))), ov)
+
+
+def _league_season_base(S, league, season):
     sc = effective_scoring(league)
     if sc:
         return get_season(season, sc)
