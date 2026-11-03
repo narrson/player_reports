@@ -54,7 +54,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime
 from pathlib import Path
 
-ENGINE_VERSION = 9  # app.py checks this so the website and the engine always match
+ENGINE_VERSION = 10  # app.py checks this so the website and the engine always match
 
 # ================================ SETTINGS ==========================================
 # Edit these to match your league. Command-line flags override the first two.
@@ -555,7 +555,7 @@ def load_season(S):
 # ------------------------------------------------------------------------------------
 
 SCORING_DEPENDENT = {"scoring", "fmt_name", "weekly", "season_tot", "pos_counts", "fpa", "fpa_avg", "xfp", "_pool",
-                     "_base", "_posproj", "_kdef", "_role", "_model", "_kdef_pool", "_team_pos", "_gapc", "_rosr", "pos_eff", "pos_td", "prior", "pos_prior", "weeks_played", "last_week", "min_games", "scoring_key"}
+                     "_base", "_posproj", "_kdef", "_role", "_model", "_kdef_pool", "_team_pos", "_gapc", "_rosr", "_asof", "pos_eff", "pos_td", "prior", "pos_prior", "weeks_played", "last_week", "min_games", "scoring_key"}
 
 
 def scoring_key(sc):
@@ -699,7 +699,7 @@ def prepare_scoring(S):
     sc = S.scoring
     S.scoring_key = scoring_key(sc)
     S._pool = {}
-    for k in ("_base", "_posproj", "_kdef", "_role", "_model", "_kdef_pool", "_team_pos", "_gapc", "_rosr"):
+    for k in ("_base", "_posproj", "_kdef", "_role", "_model", "_kdef_pool", "_team_pos", "_gapc", "_rosr", "_asof"):
         if hasattr(S, k):
             delattr(S, k)
     compute_xfp(S)
@@ -2392,9 +2392,24 @@ def _kdef_cache(S):
     return S._kdef
 
 
-def project_kdef(S, kind, ident, week=None):
+def _dst_event_pts(S, counts):
+    return sum(_sc(S.scoring, k) * counts.get(k, 0) for k in DST_KEYS)
+
+
+def project_kdef(S, kind, ident, week=None, asof=None):
+    """asof=week -> use only games before that week (honest pregame projection for a past week)."""
     week = week or next_week(S)
     C = _kdef_cache(S)
+    if asof:
+        C = dict(C)
+        C["k"] = {ident: [kicker_points(c, S.scoring) for (kid, w), c in S.k_games.items()
+                          if kid == ident and w < asof]}
+        C["d_for"] = defaultdict(list)
+        C["d_against"] = defaultdict(list)
+        for (t, w) in S.dst_pa:
+            if w < asof:
+                C["d_for"][t].append(_dst_event_pts(S, S.dst_for.get((t, w), Counter())))
+                C["d_against"][t].append(_dst_event_pts(S, S.dst_against.get((t, w), Counter())))
     if kind == "K":
         team = S.k_team.get(ident) or (S.players.get(ident) or {}).get("team")
         name = (S.players.get(ident) or {}).get("name") or ident
@@ -2597,6 +2612,76 @@ def with_injury_overrides(S, overrides):
     for k in INJURY_CACHES:
         S2.__dict__.pop(k, None)
     return S2
+
+
+
+def project_asof(S, key, week):
+    """Pregame projection for a week that has already been played, built only from the games before it
+    (so PROJ vs FINAL for past weeks is an honest comparison, not hindsight)."""
+    cache = S.__dict__.setdefault("_asof", {})
+    if (key, week) in cache:
+        return cache[(key, week)]
+    out = None
+    if str(key).startswith("DST:"):
+        out = project_kdef(S, "DEF", key[4:], week, asof=week)
+    elif (S.players.get(key) or {}).get("pos") == "K":
+        out = project_kdef(S, "K", key, week, asof=week)
+    else:
+        t = S.season_tot.get(key) or {}
+        pos = t.get("pos") or (S.players.get(key) or {}).get("pos")
+        if pos in FANTASY_POS:
+            weeks = [w for w in player_weeks(S, key) if w < week]
+            rate, det = model_rate(S, key, pos, weeks)
+            team = team_of(S, key, week) or player_team(S, key)
+            name = (S.players.get(key) or {}).get("name") or t.get("name") or key
+            gm = team_game(S, team, week) if team else None
+            out = {"pid": key, "name": name, "pos": pos, "team": team, "week": week, "bye": not gm, "label": "BYE",
+                   "opp": None, "implied": None, "fpa_rank": None, "fpa_n": None, "inj_status": None, "injf": 1.0,
+                   "reasons": [], "asof": True}
+            if not gm:
+                out.update(proj=0.0, floor=0.0, ceiling=0.0, sd=0.0)
+            else:
+                home = gm["home"] == team
+                opp = gm["away"] if home else gm["home"]
+                out.update(opp=opp, home=home, label=f"{'vs' if home else '@'} {opp}")
+                mf = vf = 1.0
+                f = S.fpa.get((opp, pos))
+                if f and f.get("adj") is not None:
+                    mf = _clamp(1 + 0.85 * (f["adj"] - 1), 0.82, 1.18)
+                    out.update(fpa_rank=f["rank"], fpa_n=f["n"])
+                if gm["total"] is not None and gm["spread"] is not None:
+                    h = (gm["total"] + gm["spread"]) / 2
+                    imp = h if home else gm["total"] - h
+                    out["implied"] = imp
+                    vf = _clamp(1 + 0.4 * (imp / _week_implied_mean(S, week) - 1), 0.88, 1.12)
+                inj = next((h for h in reversed(getattr(S, "inj_hist", {}).get(key, [])) if h["week"] == week), None)
+                injf, why = injury_factor(inj)
+                if inj and inj.get("status"):
+                    out["inj_status"] = inj["status"]
+                proj = rate * mf * vf * injf
+                sd = POS_SD[pos]
+                out.update(proj=proj, floor=max(0.0, proj - 0.84 * sd), ceiling=proj + 0.84 * sd, sd=sd, injf=injf)
+    cache[(key, week)] = out
+    return out
+
+
+def result_tier(proj, final):
+    """How a player did against his projection. Typical weekly projection misses run ~4.5 points, so a gap
+    inside max(2.5, 20% of the projection) counts as on target, and about twice the typical miss is a big one."""
+    if proj is None or final is None:
+        return None
+    d = final - proj
+    band = max(2.5, 0.2 * proj)
+    big = max(8.0, 0.5 * proj)
+    if d >= big:
+        return "boom"
+    if d > band:
+        return "beat"
+    if d <= -big:
+        return "bust"
+    if d < -band:
+        return "miss"
+    return "met"
 
 
 # ------------------------------------------------------------------------------------

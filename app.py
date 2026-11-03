@@ -31,7 +31,7 @@ import player_report as pr
 st.set_page_config(page_title="Fantasy Player Reports", page_icon="🏈", layout="wide",
                    initial_sidebar_state="collapsed")
 
-REQUIRED_ENGINE = 9
+REQUIRED_ENGINE = 10
 if getattr(pr, "ENGINE_VERSION", 0) < REQUIRED_ENGINE:
     # Streamlit can keep an old copy of player_report.py loaded after an update; load the new one.
     import importlib
@@ -202,7 +202,15 @@ div[data-testid="stDataFrame"] {{border: 1px solid {BORDER}; border-radius: 12px
 .fr-pts2 > div {{text-align: right; min-width: 48px;}}
 .fr-pts2 span {{display: block; font-size: .53rem; letter-spacing: .1em; color: {MUTED}; font-weight: 800;}}
 .fr-pts2 b {{font-size: 1rem; color: {TEXT}; font-weight: 800;}}
-.fr-pts2 b.fin {{color: #4ade80;}}
+.fr-pts2 b.fin {{color: {TEXT};}}
+.fr-pts2 b.fin.t-boom {{color: #22c55e; text-shadow: 0 0 10px rgba(34,197,94,.45);}}
+.fr-pts2 b.fin.t-beat {{color: #86efac;}}
+.fr-pts2 b.fin.t-met {{color: #fde047;}}
+.fr-pts2 b.fin.t-miss {{color: #fca5a5;}}
+.fr-pts2 b.fin.t-bust {{color: #ef4444; text-shadow: 0 0 10px rgba(239,68,68,.35);}}
+.fr-dlt {{display: block; font-style: normal; font-size: .6rem; font-weight: 800; line-height: 1;}}
+.fr-dlt.t-boom, .fr-dlt.t-beat {{color: #4ade80;}} .fr-dlt.t-met {{color: #facc15;}}
+.fr-dlt.t-miss, .fr-dlt.t-bust {{color: #f87171;}}
 .fr-pts2 b.na {{color: #475569; font-weight: 600;}}
 .fr-slot.bn {{background: transparent; border-style: dashed; flex-direction: column; line-height: 1; gap: 1px;}}
 .fr-slot.bn i {{font-style: normal; font-size: .5rem; color: {MUTED}; letter-spacing: .08em;}}
@@ -282,6 +290,17 @@ button[data-testid="stBaseButton-segmented_controlActive"], button[kind="segment
 .fr-lchip.sc {{background: linear-gradient(90deg, rgba(245,179,1,.18), rgba(249,115,22,.10)); border-color: rgba(245,179,1,.45);
               color: #fde68a;}}
 .fr-lbar-sync {{margin-left: auto; font-size: .7rem; color: {MUTED};}}
+.fr-wstrip {{display: flex; gap: .35rem; overflow-x: auto; padding: .2rem 0 .6rem; margin-bottom: .4rem;}}
+.fr-wtile {{flex: 0 0 64px; text-align: center; border-radius: 11px; padding: .35rem .2rem;
+           background: linear-gradient(180deg, #18233d, #111a2b); border: 1px solid {BORDER};}}
+.fr-wtile .wl {{font-size: .6rem; font-weight: 800; letter-spacing: .06em; color: {MUTED};}}
+.fr-wtile b {{display: block; font-size: 1.02rem; color: {TEXT};}}
+.fr-wtile b.t-beat {{color: #4ade80;}} .fr-wtile b.t-met {{color: #facc15;}} .fr-wtile b.t-miss {{color: #f87171;}}
+.fr-wtile .ws {{font-size: .58rem; color: {MUTED};}}
+.fr-wtile .by {{display: inline-block; margin-top: .15rem; font-size: .55rem; font-weight: 800; color: #fbbf24;}}
+.fr-wtile.po {{border-color: rgba(245,179,1,.35);}}
+.fr-wtile.now {{box-shadow: inset 0 -3px 0 #38bdf8;}}
+.fr-wtile.sel {{border-color: {GOLD}; background: linear-gradient(180deg, rgba(245,179,1,.22), #141d32);}}
 .fr-foot {{color: {DIM}; font-size: .76rem; margin-top: 2.2rem; text-align: center; line-height: 1.6;}}
 </style>
 """
@@ -437,7 +456,7 @@ def styled_df(df, row_bg=None, cell=None, height=None, **kw):
 # Data (cached on the server, shared by every visit)
 # ------------------------------------------------------------------------------------
 
-DATA_VERSION = 9  # bump whenever player_report.py changes what a Season holds, so stale cached data is dropped
+DATA_VERSION = 10  # bump whenever player_report.py changes what a Season holds, so stale cached data is dropped
 
 
 def preset_scoring(fmt_name):
@@ -2818,11 +2837,27 @@ def clean_scoring(sc):
     return out
 
 
+SANE_RANGES = {"pass_yd": (0, 0.2), "rush_yd": (0, 0.34), "rec_yd": (0, 0.34), "rec": (0, 2), "te_rec": (0, 2),
+               "pass_td": (0, 10), "rush_td": (0, 10), "rec_td": (0, 10), "int": (-6, 0), "fum_lost": (-6, 0),
+               "pass_cmp": (0, 1.5), "pass_att": (-1, 1), "rush_att": (0, 1.5), "rec_tgt": (0, 1.5)}
+
+
+def scoring_warnings(sc):
+    """Values that are almost certainly a typo or a misread (e.g. 5 points per catch)."""
+    out = []
+    for k, (lo, hi) in SANE_RANGES.items():
+        v = (sc or {}).get(k)
+        if v is not None and not (lo <= v <= hi):
+            lab = next((f[1] for f in ALL_SCORING_FIELDS if f[0] == k), k)
+            out.append(f"{lab}: {v:g}")
+    return out
+
+
 def scoring_summary(sc):
     if not sc:
         return ""
     r = sc.get("rec", 0)
-    ppr = "PPR" if r == 1 else "Half-PPR" if r == 0.5 else "Standard" if r == 0 else f"{r:g} PPR"
+    ppr = "PPR" if r == 1 else "Half-PPR" if r == 0.5 else "Standard" if r == 0 else f"{r:g} pts/catch"
     bits = [ppr, f"{sc.get('pass_td', 4):g}-pt pass TD"]
     py = sc.get("pass_yd", 0.04)
     if py and abs(py - 0.04) > 1e-6:
@@ -2911,14 +2946,15 @@ def espn_scoring(items):
 
 def _score_value(val):
     """'20 yards per point' -> 0.05, '1 point per 25 yards' -> 0.04, '-1' -> -1."""
-    v = str(val).strip().lower()
-    m = re.search(r"(-?\d+(?:\.\d+)?)\s*yards?\s*per\s*point", v)
+    v = str(val).strip().lower().replace("\u2212", "-")
+    NUM = r"-?(?:\d+(?:\.\d+)?|\.\d+)"          # 3, -1, 0.5 and also .5 / -.5
+    m = re.search(rf"({NUM})\s*yards?\s*per\s*point", v)
     if m and float(m.group(1)):
         return 1 / float(m.group(1))
-    m = re.search(r"(-?\d+(?:\.\d+)?)\s*points?\s*per\s*(\d+(?:\.\d+)?)\s*yards?", v)
+    m = re.search(rf"({NUM})\s*points?\s*per\s*({NUM})\s*yards?", v)
     if m and float(m.group(2)):
         return float(m.group(1)) / float(m.group(2))
-    m = re.search(r"-?\d+(?:\.\d+)?", v)
+    m = re.search(NUM, v)
     return float(m.group(0)) if m else None
 
 
@@ -3057,8 +3093,8 @@ def parse_scoring_text(text):
         if len(parts) >= 2:
             rows.append(parts)
             continue
-        m = re.match(r"^(.*?\D)\s+(-?\d+(?:\.\d+)?(?:\s+yards?\s+per\s+point|\s+points?\s+per\s+\d+\s+yards?)?)"
-                     r"(?:\s+-?\d+(?:\.\d+)?(?:\s+yards?\s+per\s+point)?)?$", line, re.I)
+        m = re.match(r"^(.*?\D)\s+(-?(?:\d+(?:\.\d+)?|\.\d+)(?:\s+yards?\s+per\s+point|\s+points?\s+per\s+\d+\s+yards?)?)"
+                     r"(?:\s+-?(?:\d+(?:\.\d+)?|\.\d+)(?:\s+yards?\s+per\s+point)?)?$", line, re.I)
         if m:
             rows.append([m.group(1).strip(), m.group(2).strip()])
         else:
@@ -3372,8 +3408,8 @@ def bookmark_widget(site, key="bm"):
 # League display components: team cards, set-vs-recommended lineups, K/DEF matchup hints
 # ------------------------------------------------------------------------------------
 
-SLOT_COLORS = {"QB": "#f2557a", "RB": "#22c3a6", "WR": "#4ea3ff", "TE": "#ff9f43", "FLEX": "#a78bfa",
-               "SUPERFLEX": "#e879f9", "K": "#94a3b8", "DEF": "#c08457", "BN": "#3b4a63", "IR": "#ef4444",
+SLOT_COLORS = {"QB": "#ff4f8b", "RB": "#22d3a6", "WR": "#4ea3ff", "TE": "#ff9f43", "FLEX": "#a78bfa",
+               "SUPERFLEX": "#f472b6", "K": "#c084fc", "DEF": "#a3e635", "BN": "#3b4a63", "IR": "#ef4444",
                "TAXI": "#3b4a63"}
 SLOT_TEXT = {"FLEX": "FLEX", "SUPERFLEX": "SFLX", "BN": "BENCH", "IR": "IR", "TAXI": "TAXI"}
 TEAM_ACCENTS = ["#f5b301", "#4ea3ff", "#22c3a6", "#f2557a", "#a78bfa", "#ff9f43", "#38bdf8", "#84cc16", "#e879f9",
@@ -3382,7 +3418,7 @@ INJ_COLORS = {"Q": AMBER, "QUESTIONABLE": AMBER, "D": "#fb923c", "DOUBTFUL": "#f
               "IR": RED, "INJURY_RESERVE": RED, "PUP": RED, "SUSP": RED, "SUSPENSION": RED}
 
 
-POS_COLORS = {"QB": "#f2557a", "RB": "#22c3a6", "WR": "#4ea3ff", "TE": "#ff9f43", "K": "#a3a3c2", "DEF": "#c08457"}
+POS_COLORS = {"QB": "#ff4f8b", "RB": "#22d3a6", "WR": "#4ea3ff", "TE": "#ff9f43", "K": "#c084fc", "DEF": "#a3e635"}
 
 
 def slot_pill(slot, pos=None):
@@ -3460,7 +3496,13 @@ def pts_cell(S, e, p, week):
     key = entry_key(e)
     proj = f'<b>{p["proj"]:.1f}</b>' if p else dash
     f = game_result(S, key, week) if key else None
-    fin = f'<b class="fin">{f:.1f}</b>' if f is not None else dash
+    tier = pr.result_tier(p["proj"], f) if (p and f is not None and not p.get("bye")) else None
+    if f is None:
+        fin = dash
+    else:
+        d = f"{f - p['proj']:+.1f}" if p and not p.get("bye") else ""
+        fin = (f'<b class="fin t-{tier or "none"}" title="{d} vs projection">{f:.1f}</b>'
+               + (f'<i class="fr-dlt t-{tier}">{d}</i>' if tier else ""))
     return f'<div class="fr-pts2"><div>{proj}</div><div>{fin}</div></div>'
 
 
@@ -3711,6 +3753,10 @@ def league_settings_editor(store, owner, row, lg):
     src = "You edited this." if lg.get("scoring_manual") else \
         (f"Synced from {lg['scoring_source']}." if lg.get("scoring_source") else "Not synced yet; please check it.")
     st.markdown(f"**Scoring** · <span style='color:{MUTED};font-size:.85rem'>{esc(src)}</span>", unsafe_allow_html=True)
+    warn = scoring_warnings(cur)
+    if warn:
+        st.warning("These look wrong and will throw off every projection: " + "; ".join(warn) +
+                   ". Fix them below (or paste your scoring table) and save.")
     if lg.get("platform") == "yahoo" and lg.get("bookmark_version", 1) < BOOKMARK_VERSION:
         st.info("Your newest bookmark reads your full Yahoo scoring table (every kicker, defense and bonus "
                 "category). Add it from Update from Yahoo, then click it on Yahoo, or paste the table below.")
@@ -4240,23 +4286,189 @@ def resync(S, store, owner, row):
     store.save(owner, row["id"], new)
 
 
+# ------------------------------------------------------------------------------------
+# Week-by-week view for a league team (past results, future matchups, byes)
+# ------------------------------------------------------------------------------------
+
+def season_weeks(S):
+    return sorted({g_["week"] for g_ in S.schedule}) or list(range(1, 19))
+
+
+def week_projs(S, keys, w, past):
+    out = {}
+    for k in keys:
+        p = pr.project_asof(S, k, w) if past else project_any(S, k, w)
+        if p:
+            out[k] = p
+    return out
+
+
+def week_summary(S, keys, slots, w, nw):
+    past = w < nw
+    projs = week_projs(S, keys, w, past)
+    lineup, bench = optimal_lineup(projs, slots)
+    proj_total = sum(l["p"]["proj"] for l in lineup if l["p"])
+    byes = [p["name"] for p in projs.values() if p.get("bye") and p["pos"] in pr.FANTASY_POS]
+    out = {"week": w, "past": past, "proj": proj_total, "byes": byes, "lineup": lineup, "bench": bench,
+           "projs": projs}
+    if past:
+        act = {k: (game_result(S, k, w) or 0.0) for k in projs}
+        out["actual"] = sum(act[l["p"]["pid"]] for l in lineup if l["p"])
+        hind = {k: {**p, "proj": act[k]} for k, p in projs.items()}
+        hl, _ = optimal_lineup(hind, slots)
+        out["best"] = sum(l["p"]["proj"] for l in hl if l["p"])
+        out["hind_lineup"] = hl
+        out["act"] = act
+    return out
+
+
+@st.cache_resource(ttl=pr.CACHE_HOURS * 3600, max_entries=24, show_spinner=False)
+def season_summaries(_S, key, keys, slots_items, nw):
+    slots = dict(slots_items)
+    return {w: week_summary(_S, list(keys), slots, w, nw) for w in season_weeks(_S)}
+
+
+def team_tier(proj, actual):
+    if actual is None:
+        return None
+    d = actual - proj
+    band = max(6.0, 0.06 * proj)
+    return "beat" if d > band else "miss" if d < -band else "met"
+
+
+def season_strip(sums, sel, nw):
+    tiles = []
+    for w, x in sums.items():
+        cls = ["fr-wtile"]
+        if w == sel:
+            cls.append("sel")
+        if w == nw:
+            cls.append("now")
+        if w in pr.FANTASY_PLAYOFF_WEEKS:
+            cls.append("po")
+        if x["past"]:
+            tier = team_tier(x["proj"], x["actual"])
+            main = f'<b class="t-{tier}">{x["actual"]:.0f}</b>'
+            sub = f'proj {x["proj"]:.0f}'
+        else:
+            main = f'<b>{x["proj"]:.0f}</b>'
+            sub = "proj"
+        bye = f'<span class="by">{len(x["byes"])} bye</span>' if x["byes"] else ""
+        tiles.append(f'<div class="{" ".join(cls)}"><div class="wl">Wk {w}{" ★" if w in pr.FANTASY_PLAYOFF_WEEKS else ""}'
+                     f'</div>{main}<div class="ws">{sub}</div>{bye}</div>')
+    H(f'<div class="fr-wstrip">{"".join(tiles)}</div>')
+
+
+def week_nav(key, weeks, nw):
+    if key not in st.session_state or st.session_state[key] not in weeks:
+        st.session_state[key] = nw if nw in weeks else weeks[-1]
+
+    def step(d):
+        i = weeks.index(st.session_state[key])
+        st.session_state[key] = weeks[max(0, min(len(weeks) - 1, i + d))]
+
+    def to_now():
+        st.session_state[key] = nw if nw in weeks else weeks[-1]
+    c1, c2, c3, c4 = st.columns([0.5, 6, 0.5, 1.1])
+    c1.button("◀", key=key + "_prev", on_click=step, args=(-1,), use_container_width=True,
+              disabled=st.session_state[key] == weeks[0])
+    c2.select_slider("Week", options=weeks, key=key, label_visibility="collapsed",
+                     format_func=lambda w: f"Week {w}" + (" (now)" if w == nw else " ★" if w in pr.FANTASY_PLAYOFF_WEEKS
+                                                          else ""))
+    c3.button("▶", key=key + "_next", on_click=step, args=(1,), use_container_width=True,
+              disabled=st.session_state[key] == weeks[-1])
+    c4.button("This week", key=key + "_now", on_click=to_now, use_container_width=True,
+              disabled=st.session_state[key] == nw)
+    return st.session_state[key]
+
+
+def render_week_view(S, me, x, slots):
+    """A past or future week for your team. Past weeks: what the model projected before kickoff (using only the
+    games before that week) next to what happened. Future weeks: projected lineup, matchups and byes."""
+    w = x["week"]
+    es = resolve_entries(S, me)
+    by_key = {entry_key(e): e for e in es if entry_key(e)}
+
+    def entry_for(p, slot):
+        e = by_key.get(p["pid"]) or make_entry(S, p["pid"] if not str(p["pid"]).startswith("DST:") else None,
+                                               p["name"], p["pos"], p["team"])
+        return {**e, "slot": slot}
+    if x["past"]:
+        tier = team_tier(x["proj"], x["actual"])
+        tcol = {"beat": GREEN, "miss": RED, "met": "#facc15"}.get(tier, TEXT)
+        left_on_bench = x["best"] - x["actual"]
+        H('<div class="fr-grid">' + "".join([
+            kpi("Pregame projection", f"{x['proj']:.1f}", "best lineup, before kickoff", BLUE),
+            kpi("That lineup scored", f"{x['actual']:.1f}", f"{x['actual'] - x['proj']:+.1f} vs projection", tcol, tcol),
+            kpi("Best possible", f"{x['best']:.1f}", "in hindsight", GOLD),
+            kpi("Left on the bench", f"{left_on_bench:.1f}", "best possible minus the pregame lineup",
+                RED if left_on_bench >= 10 else BORDER, RED if left_on_bench >= 10 else TEXT),
+        ]) + "</div>")
+        if x["byes"]:
+            H('<div class="fr-strip"><span class="fr-strip-k">Byes</span>' + " · ".join(esc(n) for n in x["byes"]) +
+              "</div>")
+        rec_ids = {l["p"]["pid"] for l in x["lineup"] if l["p"]}
+        hind_ids = {l["p"]["pid"] for l in x["hind_lineup"] if l["p"]}
+        left = grp_header("Starters", x["proj"]) + "".join(
+            player_line(S, entry_for(l["p"], l["slot"]), l["p"], w,
+                        '<span class="fr-tag sit">BENCH IT</span>' if l["p"]["pid"] not in hind_ids else "")
+            for l in x["lineup"] if l["p"])
+        bench = [p for p in x["projs"].values() if p["pid"] not in rec_ids]
+        bench.sort(key=lambda p: -(x["act"].get(p["pid"]) or 0))
+        if bench:
+            left += grp_header("Bench") + "".join(
+                player_line(S, entry_for(p, "BN"), p, w,
+                            '<span class="fr-tag start">SHOULD START</span>' if p["pid"] in hind_ids else "")
+                for p in bench)
+        right = grp_header("Starters (by actual points)") + "".join(
+            player_line(S, entry_for(x["projs"][l["p"]["pid"]], l["slot"]), x["projs"][l["p"]["pid"]], w)
+            for l in x["hind_lineup"] if l["p"])
+        H('<div class="fr-grid g2">'
+          f'<div class="fr-tc" style="border-top:4px solid {BLUE}"><div class="fr-tc-head" style="background:'
+          f'linear-gradient(120deg,{BLUE}26,transparent 70%)"><div style="flex:1"><div class="fr-tc-name">Pregame lineup'
+          f'</div><div class="fr-tc-sub">what the model would have started</div></div><div class="fr-tc-tot"><div class="v"'
+          f' style="color:{tcol}">{x["actual"]:.1f}</div><div class="l">scored · proj {x["proj"]:.1f}</div></div></div>'
+          f'<div class="fr-tc-body">{left}</div></div>'
+          f'<div class="fr-tc" style="border-top:4px solid {GOLD}"><div class="fr-tc-head" style="background:'
+          f'linear-gradient(120deg,{GOLD}26,transparent 70%)"><div style="flex:1"><div class="fr-tc-name">Best possible'
+          f'</div><div class="fr-tc-sub">in hindsight</div></div><div class="fr-tc-tot"><div class="v">{x["best"]:.1f}'
+          f'</div><div class="l">week {w}</div></div></div><div class="fr-tc-body">{right}</div></div></div>')
+        st.caption("PROJ is the model's pregame projection, built only from games before this week, so it's an honest "
+                   "test. FINAL color: bright green = big beat, green = beat, yellow = about as projected, red = "
+                   "miss, bright red = big miss (bands scale with the projection; typical weekly projections miss by "
+                   "about 4-5 points). Past lineups you actually set aren't available from your league site, so this "
+                   "shows the lineup the model would have set.")
+    else:
+        starters = [l for l in x["lineup"] if l["p"]]
+        mups = [(l["p"], l["p"].get("fpa_rank")) for l in starters if l["p"].get("fpa_rank") and not l["p"]["bye"]]
+        best = min(mups, key=lambda t: t[1]) if mups else None
+        worst = max(mups, key=lambda t: t[1]) if mups else None
+        H('<div class="fr-grid">' + "".join([
+            kpi("Projected lineup", f"{x['proj']:.1f}", f"week {w}", BLUE),
+            kpi("Players on bye", str(len(x["byes"])), ", ".join(x["byes"][:3]) or "none",
+                AMBER if x["byes"] else BORDER),
+            kpi("Best matchup", best[0]["name"] if best else "–", best[0]["label"] if best else "", GREEN),
+            kpi("Toughest matchup", worst[0]["name"] if worst else "–", worst[0]["label"] if worst else "", RED),
+        ]) + "</div>")
+        rec_ids = {l["p"]["pid"] for l in starters}
+        body = grp_header("Starters", x["proj"]) + "".join(player_line(S, entry_for(l["p"], l["slot"]), l["p"], w)
+                                                           for l in starters)
+        bench = sorted([p for p in x["projs"].values() if p["pid"] not in rec_ids], key=lambda p: -p["proj"])
+        if bench:
+            body += grp_header("Bench") + "".join(player_line(S, entry_for(p, "BN"), p, w) for p in bench)
+        H(f'<div class="fr-tc" style="border-top:4px solid {BLUE}"><div class="fr-tc-head" style="background:'
+          f'linear-gradient(120deg,{BLUE}26,transparent 70%)"><div style="flex:1"><div class="fr-tc-name">Week {w} '
+          f'outlook</div><div class="fr-tc-sub">best projected lineup from your current roster</div></div>'
+          f'<div class="fr-tc-tot"><div class="v">{x["proj"]:.1f}</div><div class="l">projected</div></div></div>'
+          f'<div class="fr-tc-body">{body}</div></div>')
+        st.caption("Projections further out use season-long usage with that week's opponent; Vegas lines and injury "
+                   "news only exist close to game day, so the nearest weeks are the sharpest.")
+
+
 def render_league(S, store, owner, row, season):
     lg = row["data"]
     LS = league_season(S, lg, season)
     tnames = {t["id"]: t["name"] for t in lg["teams"]}
-    synced = _parse_ts(lg.get("synced_at"))
-    eff_sc = effective_scoring(lg)
-    sc_src = "set by you" if lg.get("scoring_manual") else (f"from {lg['scoring_source']}" if lg.get("scoring_source")
-                                                             else "default, edit in League settings")
-    plat_col = {"sleeper": "#a78bfa", "espn": "#ef4444", "yahoo": "#8b5cf6"}.get(lg["platform"], GOLD)
-    sc_line = scoring_summary(eff_sc) if eff_sc else pr.FORMAT_LABEL[lg.get("scoring", "half")]
-    synced_txt = synced.strftime("%b %d, %I:%M %p") if synced else ""
-    H(f'<div class="fr-lbar" style="--pc:{plat_col}">'
-      f'<div class="fr-lbar-name">{esc(lg["name"])}</div>'
-      f'<span class="fr-lchip plat">{esc(PLATFORM_LABEL.get(lg["platform"], ""))}</span>'
-      f'<span class="fr-lchip">{lg["teams_in_league"]} teams</span>'
-      f'<span class="fr-lchip sc" title="Scoring {esc(sc_src)}">{esc(sc_line)}</span>'
-      + (f'<span class="fr-lbar-sync">Synced {esc(synced_txt)}</span>' if synced_txt else "") + '</div>')
     c1, c2, c3 = st.columns([2.2, 1, 1])
     ids = [t["id"] for t in lg["teams"]]
     cur = lg.get("my_team") if lg.get("my_team") in ids else None
@@ -4302,11 +4514,22 @@ def render_league(S, store, owner, row, season):
     with st.spinner("Analyzing the league..."):
         R = league_report(LS, skey(LS, row["id"], lg.get("synced_at"), pick, str(lg.get("slots"))), lg)
     week = R["week"]
-    tabs = st.tabs(["📋 My team", "🆚 Matchup", "🏆 Power rankings", "🔁 Trades", "🧲 Waiver wire",
-                    "👥 All rosters"])
     slots_all = {**DEFAULT_SLOTS, **(lg.get("slots") or {})}
+    sel_week, sums = week, None
+    if pick:
+        me_ = next(t for t in lg["teams"] if t["id"] == pick)
+        sk, kd = team_keys(LS, me_)
+        sums = season_summaries(LS, skey(LS, row["id"], lg.get("synced_at"), pick, str(lg.get("slots")), "wk"),
+                                tuple(sk + kd), tuple(sorted(slots_all.items())), week)
+        sel_week = week_nav(f"wsel_{row['id']}", list(sums), week)
+        season_strip(sums, sel_week, week)
+    tabs = st.tabs([f"📋 Week {sel_week}" if sel_week != week else "📋 My team", "🆚 Matchup", "🏆 Power rankings",
+                    "🔁 Trades", "🧲 Waiver wire", "👥 All rosters"])
     with tabs[0]:
-        if pick and R.get("mine"):
+        if pick and sel_week != week and sums:
+            me = next(t for t in lg["teams"] if t["id"] == pick)
+            render_week_view(LS, me, sums[sel_week], slots_all)
+        elif pick and R.get("mine"):
             me = next(t for t in lg["teams"] if t["id"] == pick)
             render_team(LS, {"name": tnames[pick], "roster": me["players"], "scoring": lg.get("scoring", "half")},
                         R["mine"], show_header=False,
@@ -4315,6 +4538,8 @@ def render_league(S, store, owner, row, season):
         else:
             st.caption("Pick your team above.")
     with tabs[1]:
+        if sel_week != week:
+            st.caption(f"Matchups are for the current week ({week}). Use 'This week' above to jump back.")
         render_matchup(LS, lg, R, pick, tnames, week)
     with tabs[2]:
         render_power(lg, R, pick, tnames)
@@ -4976,6 +5201,34 @@ def save_order(store, owner, by_id, ids):
     st.rerun()
 
 
+def item_bar(d):
+    """Slim name bar for the selected league or team. Built from the saved settings on every page load, so
+    scoring and lineup changes show up immediately."""
+    if d.get("kind") == "league":
+        synced = _parse_ts(d.get("synced_at"))
+        eff_sc = effective_scoring(d)
+        sc_src = "set by you" if d.get("scoring_manual") else (f"from {d['scoring_source']}" if d.get("scoring_source")
+                                                               else "default")
+        plat_col = {"sleeper": "#a78bfa", "espn": "#ef4444", "yahoo": "#8b5cf6"}.get(d["platform"], GOLD)
+        sc_line = scoring_summary(eff_sc) if eff_sc else pr.FORMAT_LABEL[d.get("scoring", "half")]
+        warn = scoring_warnings(eff_sc) if eff_sc else []
+        synced_txt = synced.strftime("%b %d, %I:%M %p") if synced else ""
+        H(f'<div class="fr-lbar" style="--pc:{plat_col}">'
+          f'<div class="fr-lbar-name">{esc(d["name"])}</div>'
+          f'<span class="fr-lchip plat">{esc(PLATFORM_LABEL.get(d["platform"], ""))}</span>'
+          f'<span class="fr-lchip">{d.get("teams_in_league", len(d.get("teams", [])))} teams</span>'
+          f'<span class="fr-lchip sc" title="Scoring {esc(sc_src)}">{esc(sc_line)}</span>'
+          + (f'<span class="fr-lchip" style="border-color:{RED};color:#fecaca">⚠ check scoring</span>' if warn else "")
+          + (f'<span class="fr-lbar-sync">Synced {esc(synced_txt)}</span>' if synced_txt else "") + '</div>')
+    else:
+        sc_line = pr.FORMAT_LABEL[d.get("scoring", "half")].replace(" scoring", "")
+        H(f'<div class="fr-lbar" style="--pc:{GOLD}"><div class="fr-lbar-name">{esc(d["name"])}</div>'
+          f'<span class="fr-lchip plat">Manual team</span>'
+          f'<span class="fr-lchip">{int(d.get("teams_in_league") or 12)}-team league</span>'
+          f'<span class="fr-lchip sc">{esc(sc_line)}</span>'
+          f'<span class="fr-lchip">{len(d.get("roster", []))} players</span></div>')
+
+
 def page_teams(S, season):
     owner, store = teams_login_gate()
     if not owner:
@@ -5053,6 +5306,8 @@ def page_teams(S, season):
             team_editor(S, store, owner, row)
             return
 
+    item_bar(by_id[st.session_state.team_sel]["data"])
+
     def label(t):
         d = by_id[t]["data"]
         star = "⭐ " if d.get("is_default") else ""
@@ -5094,7 +5349,7 @@ def page_teams(S, season):
     TS = get_season(season, team.get("scoring", S.fmt_name)) if team.get("scoring", S.fmt_name) != S.fmt_name else S
     with st.spinner("Analyzing your team..."):
         A = analyze_team(TS, team)
-    render_team(TS, team, A)
+    render_team(TS, team, A, show_header=False)
 
 
 def render_team(S, team, A, show_header=True, lineup_fn=None):
@@ -5247,6 +5502,31 @@ def render_team(S, team, A, show_header=True, lineup_fn=None):
 # Main
 # ------------------------------------------------------------------------------------
 
+VIEW_ACCENT = {"Home": ("#f5b301", "245,179,1"), "Player": ("#3b82f6", "59,130,246"),
+               "Compare": ("#a78bfa", "167,139,250"), "My Teams": ("#14b8a6", "20,184,166"),
+               "Rankings": ("#f97316", "249,115,22"), "Defense": ("#ef4444", "239,68,68")}
+
+
+def page_accent(view):
+    """Each page gets its own accent on the background glow, active nav, section markers and tab highlight.
+    Meaning-carrying colours (positions, matchups, good/bad, PROJ vs FINAL) stay the same everywhere."""
+    hexc, rgb = VIEW_ACCENT.get(view, VIEW_ACCENT["Home"])
+    H(f"""<style>
+.stApp {{background:
+    radial-gradient(1100px 620px at 8% -8%, rgba({rgb},.20), transparent 62%),
+    radial-gradient(900px 520px at 100% 0%, rgba(59,130,246,.10), transparent 60%),
+    radial-gradient(900px 700px at 50% 115%, rgba({rgb},.07), transparent 60%),
+    {BG} !important;}}
+.fr-sec:before {{background: linear-gradient(90deg, {hexc}, rgba({rgb},.25)) !important;}}
+.stTabs [data-baseweb="tab-highlight"] {{background: linear-gradient(90deg, {hexc}, rgba({rgb},.5)) !important;}}
+.stTabs [data-baseweb="tab"][aria-selected="true"] {{background: linear-gradient(180deg, rgba({rgb},.18), rgba({rgb},0)) !important;}}
+.stTabs [data-baseweb="tab"][aria-selected="true"] p {{color: {hexc} !important;}}
+button[data-testid="stBaseButton-segmented_controlActive"], button[kind="segmented_controlActive"] {{
+    background: linear-gradient(135deg, rgba({rgb},.32), rgba({rgb},.14)) !important; border-color: {hexc} !important;
+    box-shadow: 0 0 14px rgba({rgb},.22) !important;}}
+</style>""")
+
+
 def main():
     H(CSS)
     ui_helper()
@@ -5283,6 +5563,8 @@ def main():
         f_default = next((i for i, v in enumerate(FORMATS.values()) if v == qp.get("scoring", pr.SCORING_FORMAT)), 0)
         scoring = FORMATS[st.radio("Scoring", list(FORMATS), index=f_default)]
         st.caption("Point values come from the SETTINGS block in player_report.py.")
+        accents_on = st.toggle("Page accent colors", value=True, key="accents_on",
+                               help="A subtle colour per page (background glow and highlights only).")
         if get_db():
             st.markdown("### 👤 Account")
             acct = st.session_state.get("account")
@@ -5296,6 +5578,8 @@ def main():
         if st.button("🔄 Refresh data now", use_container_width=True):
             st.cache_resource.clear()
             st.rerun()
+    if st.session_state.get("accents_on", True):
+        page_accent(st.session_state.get("view", "Home"))
     if season != pr.SEASON:
         qp["season"] = str(season)
     else:
